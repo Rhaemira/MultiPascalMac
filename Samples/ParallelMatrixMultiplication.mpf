@@ -1,0 +1,46 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program ParallelMatrixMultiplication;
+
+Architecture Shared(4);
+
+const
+  N = 8;
+
+type
+  Matrix = array[1..N, 1..N] of Integer;
+
+var
+  A, B, C: Matrix;
+  i, j, k: Integer;
+  CheckSum: Integer;
+
+begin
+  for i := 1 to N do
+    for j := 1 to N do
+      A[i, j] := i + j;
+
+  for i := 1 to N do
+    for j := 1 to N do
+      B[i, j] := i - j;
+
+  { Each outer FORALL iteration computes one complete output row.
+    The inner loops stay sequential because each C[i,j] is a reduction. }
+  forall i := 1 to N do
+  begin
+    for j := 1 to N do
+    begin
+      C[i, j] := 0;
+      for k := 1 to N do
+        C[i, j] := C[i, j] + A[i, k] * B[k, j];
+    end;
+  end;
+
+  CheckSum := 0;
+  for i := 1 to N do
+    for j := 1 to N do
+      CheckSum := CheckSum + C[i, j];
+
+  writeln('C[1,1]   = ', C[1,1]);
+  writeln('C[8,8]   = ', C[8,8]);
+  writeln('Checksum = ', CheckSum);
+end.

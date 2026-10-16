@@ -1,0 +1,71 @@
+# Maintained by Amirali Yazdani.
+name: CI
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-validation:
+    name: Build, test, and package on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Run core regression tests
+        run: swift test
+
+      - name: Build release application product
+        run: swift build -c release --product MultiPascalMac
+
+      - name: Smoke-test sample programs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hello="$(swift run mpwin Samples/HelloParallel.mpf)"
+          printf '%s\n' "$hello"
+          grep -Fq '1 64' <<< "$hello"
+
+          matrix="$(swift run mpwin Samples/ParallelMatrixMultiplication.mpf)"
+          printf '%s\n' "$matrix"
+          grep -Fq 'C[1,1]' <<< "$matrix"
+          grep -Fq '196' <<< "$matrix"
+          grep -Fq 'C[8,8]' <<< "$matrix"
+          grep -Fq -- '-308' <<< "$matrix"
+          grep -Fq 'Checksum = 2688' <<< "$matrix"
+
+          ranksort="$(swift run mpwin Samples/RankSortParallel.mpf --input Samples/RankSortParallel.in)"
+          printf '%s\n' "$ranksort"
+          grep -Fq '1 2 3 3 5 7 8 9' <<< "$ranksort"
+
+          channels="$(swift run mpwin Samples/Channels.mpf)"
+          printf '%s\n' "$channels"
+          grep -Fq '42' <<< "$channels"
+
+          processors="$(swift run mpwin Samples/Processors.mpf)"
+          printf '%s\n' "$processors"
+          grep -Fq '0 3' <<< "$processors"
+
+          input_example="$(swift run mpwin Samples/ReadExample.mpf --input Samples/ReadExample.in)"
+          printf '%s\n' "$input_example"
+          grep -Fq '42' <<< "$input_example"
+
+      - name: Build app bundle and DMG
+        run: |
+          chmod +x BuildMacApp.command PackageDMG.command
+          ./PackageDMG.command
+          plutil -lint "Multi-Pascal Mac.app/Contents/Info.plist"
+          test -s "dist/Multi-Pascal-Mac-1.1-Amirali-Yazdani.dmg"

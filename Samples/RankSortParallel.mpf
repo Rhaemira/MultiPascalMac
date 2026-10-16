@@ -1,0 +1,41 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program RankSortParallel;
+
+Architecture Shared(4);
+
+const
+  N = 8;
+
+type
+  ArrType = array[1..N] of Integer;
+
+var
+  A, Sorted: ArrType;
+  Rank: array[1..N] of Integer;
+  i, j: Integer;
+
+begin
+  writeln('Enter ', N, ' integers:');
+  for i := 1 to N do
+    read(A[i]);
+
+  { One independent process computes the rank of one element. The inner
+    comparison loop is sequential because Rank[i] is updated repeatedly. }
+  forall i := 1 to N do
+  begin
+    Rank[i] := 1;
+    for j := 1 to N do
+      if (A[j] < A[i]) or
+         ((A[j] = A[i]) and (j < i)) then
+        Rank[i] := Rank[i] + 1;
+  end;
+
+  { Each element has a unique rank because equal values are tie-broken by index. }
+  forall i := 1 to N do
+    Sorted[Rank[i]] := A[i];
+
+  writeln('Sorted:');
+  for i := 1 to N do
+    Write(Sorted[i], ' ');
+  WriteLn;
+end.

@@ -1,0 +1,14 @@
+# Maintained by Amirali Yazdani
+.build/
+.DS_Store
+*.swp
+*.tmp
+dist/
+*.dmg
+*.app/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside

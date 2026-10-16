@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maintained by Amirali Yazdani. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key><string>Multi-Pascal Mac</string>
+    <key>CFBundleExecutable</key><string>MultiPascalMac</string>
+    <key>CFBundleIdentifier</key><string>org.multipascal.mac</string>
+    <key>CFBundleName</key><string>Multi-Pascal Mac</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Amirali Yazdani</string>
+    <key>CFBundleVersion</key><string>1.1</string>
+    <key>CFBundleShortVersionString</key><string>1.1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSSupportsSuddenTermination</key><false/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Multi-Pascal Source</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSItemContentTypes</key>
+            <array><string>org.multipascal.source</string></array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.multipascal.source</string>
+            <key>UTTypeDescription</key><string>Multi-Pascal source code</string>
+            <key>UTTypeConformsTo</key><array><string>public.source-code</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>mpf</string></array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

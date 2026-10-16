@@ -1,0 +1,7 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program ReadExample;
+var x: Integer;
+begin
+  readln(x);
+  writeln(x * 2);
+end.

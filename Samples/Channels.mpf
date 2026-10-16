@@ -1,0 +1,9 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program Channels;
+Architecture Shared(2);
+var c: Channel of Integer;
+begin
+  fork c := 42;
+  join;
+  writeln(c);
+end.

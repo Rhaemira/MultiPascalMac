@@ -1,0 +1,10 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program Processors;
+Architecture Shared(4);
+var a: array [1..4] of Integer;
+var i: Integer;
+begin
+  forall i := 1 to 4 do (@(i - 1)) a[i] := %SELF;
+  join;
+  writeln(a[1], ' ', a[4]);
+end.

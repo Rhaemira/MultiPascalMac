@@ -1,0 +1,11 @@
+{ Created by Amirali Yazdani on 10/16/26. }
+program HelloParallel;
+Architecture Shared(4);
+var a: array [1..8] of Integer;
+var i: Integer;
+begin
+  forall i := 1 to 8 do
+    a[i] := i * i;
+  join;
+  writeln(a[1], ' ', a[8]);
+end.
