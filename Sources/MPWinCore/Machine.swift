@@ -113,6 +113,7 @@ enum Suspend: Error {
 /// still be stopped.
 enum Interrupt: Error {
     case cancelled
+    case timeLimitExceeded
 }
 
 // MARK: - Frames and processes
@@ -342,6 +343,7 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
+            if outcome.timeLimitExceeded { return .timeLimitExceeded }
             if outcome.cancelled {
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
@@ -386,6 +388,7 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
+            if outcome.timeLimitExceeded { return .timeLimitExceeded }
             if outcome.cancelled {
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
@@ -404,6 +407,7 @@ public final class Machine: @unchecked Sendable {
         var error: String?
         var stoppedForBreakpoint = false
         var cancelled = false
+        var timeLimitExceeded = false
         var isSuccess: Bool { error == nil && !cancelled }
     }
 
@@ -557,6 +561,9 @@ public final class Machine: @unchecked Sendable {
                     return outcome
                 } catch Interrupt.cancelled {
                     outcome.cancelled = true
+                    return outcome
+                } catch Interrupt.timeLimitExceeded {
+                    outcome.timeLimitExceeded = true
                     return outcome
                 } catch let error as MPWinError {
                     outcome.error = error.description
@@ -1042,13 +1049,15 @@ public final class Machine: @unchecked Sendable {
     private func spawnChild(of parent: Process, scope: Scope, routine: Int, op: Int,
                             homeProcessor: Int?, ports: [MemoryRef]) -> Process {
         // The child's only frame is a copy of the parent's innermost one, so references to
-        // that frame are rebased to frame 0. References into the parent's callers cannot be
-        // followed from the child and are marked unreachable (see `address(of:)`).
+        // that frame are rebased to frame 0. References into the parent's callers keep
+        // pointing at the parent's frames, so `var` parameters still reach the caller.
         let parentFrame = parent.frames.count - 1
         let varParams = parent.frame.varParams.map { ref -> MemoryRef in
             guard case .local(let frame) = ref.segment else { return ref }
-            return MemoryRef(segment: .local(frame: frame == parentFrame ? 0 : -1),
-                             address: ref.address)
+            let segment: Segment = frame == parentFrame
+                ? .local(frame: 0)
+                : .processLocal(process: parent.id, frame: frame)
+            return MemoryRef(segment: segment, address: ref.address)
         }
         let frame = Frame(routine: routine, op: op, scope: scope,
                           slots: parent.frame.slots,

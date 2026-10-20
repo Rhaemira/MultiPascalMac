@@ -106,15 +106,7 @@ extension Machine {
                     throw MPWinError.semantic(Diagnostic(.error,
                         "Error in the indicated expression.", location))
                 }
-                let ref = process.frame.varParams[index]
-                if case .local = ref.segment, frameIndex(of: ref, process) == nil {
-                    // A FORALL/FORK child only has a copy of its parent's innermost frame,
-                    // so a caller's local variable passed by reference is out of reach.
-                    throw MPWinError.runtime(Diagnostic(.error,
-                        "VAR parameter \(name) refers to a local variable of a calling routine, which a spawned process cannot access.",
-                        location))
-                }
-                return ref
+                return process.frame.varParams[index]
             case .constant:
                 throw MPWinError.semantic(Diagnostic(.error, "Error in Variable Name", location))
             case .typeAlias:
@@ -257,15 +249,22 @@ extension Machine {
             }
             return value
         case .local:
-            guard let frame = frameIndex(of: ref, process),
-                  ref.address >= 0, ref.address < process.frames[frame].slots.count,
-                  let value = process.frames[frame].slots[ref.address] else {
-                return .void
-            }
-            return value
+            guard let frame = frameIndex(of: ref, process) else { return .void }
+            return slotValue(process.frames[frame], ref.address)
+        case .processLocal(let owner, let frame):
+            guard owner >= 0, owner < processes.count,
+                  frame >= 0, frame < processes[owner].frames.count else { return .void }
+            return slotValue(processes[owner].frames[frame], ref.address)
         case .cell(let box):
             return box[ref.address] ?? .void
         }
+    }
+
+    private func slotValue(_ frame: Frame, _ address: Int) -> Value {
+        guard address >= 0, address < frame.slots.count, let value = frame.slots[address] else {
+            return .void
+        }
+        return value
     }
 
     func rawStore(ref: MemoryRef, value: Value) {
@@ -276,6 +275,12 @@ extension Machine {
             }
         case .cell(let box):
             box[ref.address] = value
+        case .processLocal(let owner, let frame):
+            guard owner >= 0, owner < processes.count,
+                  frame >= 0, frame < processes[owner].frames.count,
+                  ref.address >= 0, ref.address < processes[owner].frames[frame].slots.count
+            else { return }
+            processes[owner].frames[frame].slots[ref.address] = value
         case .local:
             break
         }
@@ -595,6 +600,7 @@ extension Machine {
             // The scheduler only checks between statements, and this loop runs a whole
             // function inside one, so an endless loop here must check for itself.
             if isCancelled { throw Interrupt.cancelled }
+            if let limit = options.timeLimit, time >= limit { throw Interrupt.timeLimitExceeded }
             let frame = process.frames[process.frames.count - 1]
             let routine = program.routines[frame.routine]
             guard frame.op < routine.code.count else {

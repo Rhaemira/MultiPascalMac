@@ -1086,4 +1086,64 @@ final class MPWinCoreTests: XCTestCase {
         """)
         XCTAssertEqual(machine.output, "43\n")
     }
+
+    func testForallChildWritesThroughVarParameterToCallersLocal() throws {
+        let machine = try run("""
+        program Test;
+        type Arr = array [1..3] of Integer;
+        procedure Fill(var A: Arr);
+        var i: Integer;
+        begin
+          forall i := 1 to 3 do A[i] := i * 10;
+        end;
+        procedure Outer;
+        var local: Arr;
+        begin
+          Fill(local);
+          writeln(local[1], ' ', local[2], ' ', local[3]);
+        end;
+        begin
+          Outer;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "10 20 30\n")
+    }
+
+    func testProcedureLocalChannel() throws {
+        let machine = try run("""
+        program Test;
+        procedure P;
+        var c: Channel of Integer;
+            v: Integer;
+        begin
+          fork c := 41;
+          v := c;
+          writeln(v + 1);
+        end;
+        begin
+          P;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "42\n")
+    }
+
+    func testTimeLimitStopsEndlessLoopInsideFunction() throws {
+        let program = try compile("""
+        program Test;
+        function Spin(start: Integer): Integer;
+        var i: Integer;
+        begin
+          i := start;
+          while true do i := i + 1;
+          Spin := i;
+        end;
+        var x: Integer;
+        begin
+          x := Spin(0);
+        end.
+        """)
+        let machine = Machine(program: program, options: ProgramOptions(timeLimit: 1_000))
+        machine.start()
+        XCTAssertEqual(machine.run(), .timeLimitExceeded)
+    }
 }

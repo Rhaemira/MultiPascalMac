@@ -295,6 +295,9 @@ public enum Segment: Sendable, Hashable {
     /// A slot in one of the running process's frames, identified by its index in the
     /// call stack so a `var` parameter keeps referring to the caller's variable.
     case local(frame: Int)
+    /// A slot in a frame of another process: a spawned child's `var` parameter that
+    /// refers to a local variable of one of its parent's callers.
+    case processLocal(process: Int, frame: Int)
     /// A location reached through a `^` dereference.
     case cell(CellBox)
 }
