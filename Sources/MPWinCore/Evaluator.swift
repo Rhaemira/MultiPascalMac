@@ -20,7 +20,11 @@ extension Machine {
         case .nilLiteral: return .pointer(.integer)
 
         case .identifier(let name, _):
-            guard let binding = process.frame.scope.lookup(name) else { return .integer }
+            guard let binding = process.frame.scope.lookup(name) else {
+                // An unbound name can still be a parameterless function call.
+                guard let index = program.routine(named: name).first else { return .integer }
+                return program.routines[index].resultType
+            }
             return type(of: binding)
 
         case .index(let base, let subscripts, _):
@@ -96,7 +100,7 @@ extension Machine {
             switch binding {
             case .global(let ref, _): return ref
             case .localSlot(let slot, _), .functionResult(let slot, _), .loopIndex(let slot, _):
-                return .localSlot(slot)
+                return .localSlot(slot, frame: process.frames.count - 1)
             case .varParam(let index, _):
                 guard index < process.frame.varParams.count else {
                     throw MPWinError.semantic(Diagnostic(.error,
@@ -196,7 +200,7 @@ extension Machine {
     func load(ref: MemoryRef, type: TypeInfo, process: Process) throws -> Value {
         // A channel-typed location reads from the channel, which may block.
         if case .channelOf = type {
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to read a channel that is not initialised",
                     SourceLocation(line: 0, column: 0)))
@@ -225,18 +229,18 @@ extension Machine {
             }
             return .record(values)
         default:
-            if case .local = ref.segment {
-                guard ref.address >= 0, ref.address < process.frame.slots.count,
-                      let value = process.frame.slots[ref.address] else {
-                    return .void
-                }
-                return value
-            }
-            return try rawLoad(ref: ref)
+            return try rawLoad(ref: ref, process: process)
         }
     }
 
-    func rawLoad(ref: MemoryRef) throws -> Value {
+    /// The index into `process.frames` a local reference denotes, when that frame exists.
+    func frameIndex(of ref: MemoryRef, _ process: Process) -> Int? {
+        guard case .local(let frame) = ref.segment,
+              frame >= 0, frame < process.frames.count else { return nil }
+        return frame
+    }
+
+    func rawLoad(ref: MemoryRef, process: Process) throws -> Value {
         switch ref.segment {
         case .shared:
             guard ref.address >= 0, ref.address < sharedMemory.count,
@@ -245,10 +249,22 @@ extension Machine {
             }
             return value
         case .local:
-            return .void
+            guard let frame = frameIndex(of: ref, process) else { return .void }
+            return slotValue(process.frames[frame], ref.address)
+        case .processLocal(let owner, let frame):
+            guard owner >= 0, owner < processes.count,
+                  frame >= 0, frame < processes[owner].frames.count else { return .void }
+            return slotValue(processes[owner].frames[frame], ref.address)
         case .cell(let box):
             return box[ref.address] ?? .void
         }
+    }
+
+    private func slotValue(_ frame: Frame, _ address: Int) -> Value {
+        guard address >= 0, address < frame.slots.count, let value = frame.slots[address] else {
+            return .void
+        }
+        return value
     }
 
     func rawStore(ref: MemoryRef, value: Value) {
@@ -259,23 +275,32 @@ extension Machine {
             }
         case .cell(let box):
             box[ref.address] = value
+        case .processLocal(let owner, let frame):
+            guard owner >= 0, owner < processes.count,
+                  frame >= 0, frame < processes[owner].frames.count,
+                  ref.address >= 0, ref.address < processes[owner].frames[frame].slots.count
+            else { return }
+            processes[owner].frames[frame].slots[ref.address] = value
         case .local:
             break
         }
     }
 
-    /// Stores into a process-local slot.
+    /// Stores into a process-local slot, or into shared/pointer memory for other references.
     func storeLocal(_ process: Process, _ ref: MemoryRef, value: Value) {
         guard case .local = ref.segment else {
             rawStore(ref: ref, value: value)
             return
         }
-        let frame = process.frame
-        guard ref.address >= 0 && ref.address < Self.maximumPointerCells else { return }
-        var slots = frame.slots
-        while slots.count <= ref.address { slots.append(nil) }
-        slots[ref.address] = value
-        process.frame.slots = slots
+        guard let frame = frameIndex(of: ref, process),
+              ref.address >= 0 && ref.address < Self.maximumPointerCells else { return }
+        // Mutate in place: copying the slot array on every store made large local
+        // arrays quadratic to fill.
+        if process.frames[frame].slots.count <= ref.address {
+            process.frames[frame].slots.append(contentsOf:
+                repeatElement(nil, count: ref.address - process.frames[frame].slots.count + 1))
+        }
+        process.frames[frame].slots[ref.address] = value
     }
 
     func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
@@ -312,7 +337,7 @@ extension Machine {
     func store(ref: MemoryRef, type: TypeInfo, value: Value, target: Expression,
                process: Process) throws {
         if case .channelOf = type {
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to write to a channel that is not initialised", target.location))
             }
@@ -340,16 +365,12 @@ extension Machine {
             }
             return
         case .spinlock:
-            if case .local = ref.segment { storeLocal(process, ref, value: .boolean(value.truthy)) }
-            else { rawStore(ref: ref, value: .boolean(value.truthy)) }
+            storeLocal(process, ref, value: .boolean(value.truthy))
             return
         default:
             break
         }
-        switch ref.segment {
-        case .local: storeLocal(process, ref, value: coerced)
-        default: rawStore(ref: ref, value: coerced)
-        }
+        storeLocal(process, ref, value: coerced)
     }
 
     private func coerce(_ value: Value, to type: TypeInfo, at location: SourceLocation) throws -> Value {
@@ -397,15 +418,31 @@ extension Machine {
 
     // MARK: - Channels
 
-    /// Takes one packet from a channel, blocking until one arrives.
+    /// Takes one packet from a channel, blocking until one arrives. Like a function result,
+    /// a packet taken by a statement that later blocks is recorded, so the retried statement
+    /// gets the same packet instead of consuming another one.
     func readChannel(_ buffer: ChannelBuffer, ref: MemoryRef, process: Process) throws -> Value {
-        if !buffer.queue.isEmpty {
-            let value = buffer.queue.removeFirst()
-            chargeChannelOperation()
+        let frame = process.frames.count - 1
+        let cursor = process.frames[frame].callCursor
+        if cursor < process.frames[frame].callResults.count,
+           let value = process.frames[frame].callResults[cursor].value {
+            process.frames[frame].callCursor = process.frames[frame].callResults[cursor].next
             return value
         }
-        process.waitingOn = buffer
-        throw Suspend.block(.channelRead(ref), readyAt: nil)
+        guard !buffer.queue.isEmpty else {
+            process.waitingOn = buffer
+            throw Suspend.block(.channelRead(ref), readyAt: nil)
+        }
+        let value = buffer.queue.removeFirst()
+        chargeChannelOperation()
+        let recorded = Frame.CallResult(value: value, next: cursor + 1)
+        if cursor < process.frames[frame].callResults.count {
+            process.frames[frame].callResults[cursor] = recorded
+        } else {
+            process.frames[frame].callResults.append(recorded)
+        }
+        process.frames[frame].callCursor = cursor + 1
+        return value
     }
 
     /// Puts one packet on a channel and wakes a reader waiting for it.
@@ -442,14 +479,20 @@ extension Machine {
         // address path (otherwise a runtime expression such as `N` in `1 to N`
         // incorrectly reports "Error in Variable Name").
         switch expression {
-        case .identifier(let name, _):
-            if case .constant(let value, _)? = process.frame.scope.lookup(name) {
+        case .identifier(let name, let location):
+            let binding = process.frame.scope.lookup(name)
+            if case .constant(let value, _)? = binding {
                 return value
+            }
+            // Pascal calls a parameterless function without parentheses: `x := Next;`.
+            if binding == nil, let index = program.routine(named: name).first,
+               program.routines[index].isFunction {
+                return try evaluateCall(name, [], location, process)
             }
             let ref = try address(of: expression, process)
             let type = staticType(of: expression, process)
             if case .channelOf = type {
-                guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+                guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                     throw MPWinError.runtime(Diagnostic(.error,
                         "Attempt to read a channel that is not initialised", expression.location))
                 }
@@ -460,7 +503,7 @@ extension Machine {
             let ref = try address(of: expression, process)
             let type = staticType(of: expression, process)
             if case .channelOf = type {
-                guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+                guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                     throw MPWinError.runtime(Diagnostic(.error,
                         "Attempt to read a channel that is not initialised", expression.location))
                 }
@@ -521,7 +564,7 @@ extension Machine {
                                                      location))
             }
             let ref = try address(of: inner, process)
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to test a channel that is not initialised", location))
             }
@@ -561,36 +604,56 @@ extension Machine {
         guard let index = program.routine(named: name).first else {
             throw MPWinError.semantic(Diagnostic(.error, "Error in Variable Name", location))
         }
-        let depth = process.frames.count
-        try performCall(process, index, arguments, returnOffset: 0)
-        return try runInline(process, depth: depth)
+        let caller = process.frames.count - 1
+        let slot: Int
+        let cursor = process.frames[caller].callCursor
+        if cursor < process.frames[caller].callResults.count {
+            // The statement is being retried after a suspension.
+            let recorded = process.frames[caller].callResults[cursor]
+            if let value = recorded.value {
+                process.frames[caller].callCursor = recorded.next
+                return value
+            }
+            // The call never got under way (its arguments blocked): reuse its entry.
+            slot = cursor
+        } else {
+            slot = process.frames[caller].callResults.count
+            process.frames[caller].callResults.append(Frame.CallResult(value: nil, next: 0))
+        }
+        process.frames[caller].callCursor = slot + 1
+        try performCall(process, index, arguments, returnOffset: 0, callResultIndex: slot)
+        try runInline(process, depth: caller + 1)
+        let recorded = process.frames[caller].callResults[slot]
+        process.frames[caller].callCursor = recorded.next
+        return recorded.value ?? .void
     }
 
     /// Runs a called function to completion inside the current statement.
-    private func runInline(_ process: Process, depth: Int) throws -> Value {
-        var captured = Value.void
+    private func runInline(_ process: Process, depth: Int) throws {
         while process.frames.count > depth {
+            // The scheduler only checks between statements, and this loop runs a whole
+            // function inside one, so an endless loop here must check for itself.
+            if isCancelled { throw Interrupt.cancelled }
+            if let limit = options.timeLimit, time >= limit { throw Interrupt.timeLimitExceeded }
             let frame = process.frames[process.frames.count - 1]
             let routine = program.routines[frame.routine]
             guard frame.op < routine.code.count else {
-                if let slot = routine.resultSlot, let value = frame.slots[slot] {
-                    captured = value
-                }
                 try leaveRoutine(process)
                 continue
             }
             let op = routine.code[frame.op]
             do {
+                let frameIndex = beginStatement(process)
                 try step(process, op, line: 0)
+                endStatement(process, frameIndex)
             } catch let suspend as Suspend {
-                // A blocking operation inside a function re-enters it on resume; the
-                // functions in the original's sample programs are free of side effects
-                // across such a suspension.
+                // The function's frames stay on the stack: on resume the process finishes
+                // the function, records its result in the caller's frame and retries the
+                // caller's statement, which then replays that result (see `evaluateCall`).
                 process.resumePending = false
                 throw suspend
             }
         }
-        return captured
     }
 
     private func evaluateBuiltin(_ builtin: Builtin, _ arguments: [Expression],

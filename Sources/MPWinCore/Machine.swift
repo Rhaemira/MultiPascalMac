@@ -109,6 +109,13 @@ enum Suspend: Error {
     case block(BlockReason, readyAt: Int?)
 }
 
+/// Thrown from inside a function call evaluated inline, so a runaway function can
+/// still be stopped.
+enum Interrupt: Error {
+    case cancelled
+    case timeLimitExceeded
+}
+
 // MARK: - Frames and processes
 
 /// One activation record. Locals live in a flat slot array; `var` parameters are held
@@ -126,10 +133,25 @@ struct Frame {
     /// Saved caller state, so the machine can return without a dedicated return opcode.
     var returnAddress: ReturnAddress?
     var executed: Int = 0
+    /// Results of the functions called by the statement this frame is executing. When the
+    /// statement blocks and is retried, finished calls return their recorded result instead
+    /// of running (and repeating their side effects) again.
+    var callResults: [CallResult] = []
+    var callCursor = 0
+    /// Where the caller records this frame's result, when it was called from an expression.
+    var callResultIndex: Int?
 
     struct ReturnAddress {
         var routine: Int
         var op: Int
+    }
+
+    struct CallResult {
+        /// `nil` while the call is still in progress.
+        var value: Value?
+        /// The cursor position after this call, so a replay skips the calls made while
+        /// evaluating its arguments.
+        var next: Int
     }
 
     init(routine: Int, op: Int, scope: Scope, slots: [Value?], varParams: [MemoryRef] = [],
@@ -231,18 +253,20 @@ public final class Machine: @unchecked Sendable {
     /// Collects the profile the original's `PROFILE` command produces.
     public var collectProfile = false
     public private(set) var profileSamples: [ProfileSample] = []
+    private static let maximumProfileSamples = 200_000
 
     var sharedMemory: [Value?]
     private var runQueue: [Int] = []
     private var nextProcessID = 0
     private var random: SplitMix64
-    private var inputLines: [String]
+    private var inputLines: [[Character]]
     private var inputLine = 0
     private var inputColumn = 0
     private var stepCounter = 0
     let timing: TimingModel
     private let processorCount: Int
     private let cancellation: SimulationCancellation?
+    var isCancelled: Bool { cancellation?.isCancelled == true }
 
     public init(program: CompiledProgram, options: ProgramOptions = ProgramOptions(),
                 cancellation: SimulationCancellation? = nil) {
@@ -257,10 +281,14 @@ public final class Machine: @unchecked Sendable {
         self.processorBusyTime = [Int](repeating: 0, count: processorCount)
         self.activeProcessor = nil
         self.random = SplitMix64(seed: options.seed)
-        self.inputLines = (options.input ?? "")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        if inputLines.isEmpty { inputLines = [""] }
+        var lines = (options.input ?? "")
+            // "\r\n" is a single Character in Swift, so it must be matched explicitly.
+            .split(omittingEmptySubsequences: false,
+                   whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" })
+            .map { Array($0) }
+        // A final line terminator ends the last line; it does not start another one.
+        if lines.count > 1, lines.last?.isEmpty == true { lines.removeLast() }
+        self.inputLines = lines
     }
 
     // MARK: Lifecycle
@@ -296,7 +324,7 @@ public final class Machine: @unchecked Sendable {
             if runIterations > 1_000_000 {
                 return .stepLimitReached
             }
-            if cancellation?.isCancelled == true {
+            if isCancelled {
                 metrics.processCount = processes.count
                 metrics.parallelTime = time
                 return .cancelled
@@ -330,6 +358,7 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
+            if outcome.timeLimitExceeded { return .timeLimitExceeded }
             if outcome.cancelled {
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
@@ -342,7 +371,7 @@ public final class Machine: @unchecked Sendable {
     public func step(maxSteps: Int = 1) -> RunOutcome {
         var executed = 0
         while executed < maxSteps {
-            if cancellation?.isCancelled == true {
+            if isCancelled {
                 metrics.processCount = processes.count
                 metrics.parallelTime = time
                 return .cancelled
@@ -374,6 +403,7 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
+            if outcome.timeLimitExceeded { return .timeLimitExceeded }
             if outcome.cancelled {
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
@@ -392,6 +422,7 @@ public final class Machine: @unchecked Sendable {
         var error: String?
         var stoppedForBreakpoint = false
         var cancelled = false
+        var timeLimitExceeded = false
         var isSuccess: Bool { error == nil && !cancelled }
     }
 
@@ -481,7 +512,7 @@ public final class Machine: @unchecked Sendable {
         var outcome = StepOutcome()
         var steps = 0
         while steps < budget {
-            if cancellation?.isCancelled == true {
+            if isCancelled {
                 outcome.cancelled = true
                 return outcome
             }
@@ -528,7 +559,9 @@ public final class Machine: @unchecked Sendable {
                 let activityProcessor = activityProcessorIndex(for: process)
                 let activityStart = processorBusyTime[activityProcessor]
                 do {
+                    let frameIndex = beginStatement(process)
                     try step(process, op, line: line)
+                    endStatement(process, frameIndex)
                     recordActivity(process: process, processor: activityProcessor, line: line,
                                    label: activityLabel(for: op), kind: .instruction,
                                    startTime: activityStart,
@@ -542,6 +575,12 @@ public final class Machine: @unchecked Sendable {
                     switch suspend {
                     case .block(let reason, let readyAt): block(process, reason, readyAt: readyAt)
                     }
+                    return outcome
+                } catch Interrupt.cancelled {
+                    outcome.cancelled = true
+                    return outcome
+                } catch Interrupt.timeLimitExceeded {
+                    outcome.timeLimitExceeded = true
                     return outcome
                 } catch let error as MPWinError {
                     outcome.error = error.description
@@ -627,7 +666,8 @@ public final class Machine: @unchecked Sendable {
 
     private func sample(_ process: Process, line: Int) {
         let step = max(1, timing.activitySampleStep)
-        guard stepCounter % step == 0 else { return }
+        guard stepCounter % step == 0,
+              profileSamples.count < Self.maximumProfileSamples else { return }
         profileSamples.append(ProfileSample(time: time, processID: process.id,
                                             processor: process.processor, line: line))
     }
@@ -756,10 +796,7 @@ public final class Machine: @unchecked Sendable {
 
         case .dispose(let target):
             let ref = try address(of: target, process)
-            rawStore(ref: ref, value: .pointer(nil))
-            if case .local = ref.segment {
-                storeLocal(process, ref, value: .pointer(nil))
-            }
+            storeLocal(process, ref, value: .pointer(nil))
             charge(timing.disposeStatement)
             advance(process)
         }
@@ -767,6 +804,20 @@ public final class Machine: @unchecked Sendable {
 
     private func advance(_ process: Process) {
         process.frame.op += 1
+    }
+
+    /// Starts (or retries) the statement in the innermost frame; returns that frame's index.
+    func beginStatement(_ process: Process) -> Int {
+        let index = process.frames.count - 1
+        process.frames[index].callCursor = 0
+        return index
+    }
+
+    /// The statement finished, so its recorded call results are no longer needed.
+    func endStatement(_ process: Process, _ index: Int) {
+        guard index < process.frames.count else { return }
+        process.frames[index].callResults.removeAll()
+        process.frames[index].callCursor = 0
     }
 
     /// `Duration n` suspends the process for `n` simulated time units. The wake time is
@@ -798,7 +849,7 @@ public final class Machine: @unchecked Sendable {
     // MARK: Calls and returns
 
     func performCall(_ process: Process, _ index: Int, _ arguments: [Argument],
-                      returnOffset: Int = 1) throws {
+                      returnOffset: Int = 1, callResultIndex: Int? = nil) throws {
         let callee = program.routines[index]
         let returnAddress = Frame.ReturnAddress(routine: process.frame.routine,
                                                 op: process.frame.op + returnOffset)
@@ -806,7 +857,6 @@ public final class Machine: @unchecked Sendable {
         var varParams: [MemoryRef] = []
         var frame = Frame(routine: index, op: 0, scope: callee.scope, slots: slots,
                           varParams: varParams)
-        initializeFrame(&frame, using: callee.scope)
         var valueCursor = 0
         var varCursor = 0
         for (position, parameter) in callee.parameters.enumerated() {
@@ -835,6 +885,9 @@ public final class Machine: @unchecked Sendable {
         frame.slots = slots
         frame.varParams = varParams
         frame.returnAddress = returnAddress
+        frame.callResultIndex = callResultIndex
+        // Defaults go in after the arguments; this only fills slots that are still empty.
+        initializeFrame(&frame, using: callee.scope)
         process.frames.append(frame)
     }
 
@@ -884,12 +937,16 @@ public final class Machine: @unchecked Sendable {
             process.frames.removeLast()
             var caller = process.frames[process.frames.count - 1]
             caller.op = back.op
-            process.frames[process.frames.count - 1] = caller
-            if let resultSlot = program.routines[back.routine].resultSlot {
+            if let index = frame.callResultIndex, index < caller.callResults.count {
                 // A function result lives in the callee's frame, so it is copied out
-                // before the frame is discarded.
-                _ = resultSlot
+                // before the frame is discarded. This also covers a function that
+                // blocked and finished later, after its statement was abandoned.
+                let resultSlot = program.routines[frame.routine].resultSlot
+                let value = resultSlot.flatMap { $0 < frame.slots.count ? frame.slots[$0] : nil }
+                caller.callResults[index] = Frame.CallResult(value: value ?? .void,
+                                                             next: caller.callCursor)
             }
+            process.frames[process.frames.count - 1] = caller
             return
         }
         try performBodyEnd(process)
@@ -978,6 +1035,9 @@ public final class Machine: @unchecked Sendable {
                 child.processor = try validatedProcessor(requested)
             }
             child.ports = try resolvePorts(op.ports, child)
+            // Those expressions ran outside any statement of the child; don't let the
+            // child's first statement replay their results.
+            endStatement(child, 0)
             if groupFirst < groupLast {
                 child.forallContinuation = ForallContinuation(
                     nextIndex: groupFirst + 1,
@@ -1008,6 +1068,7 @@ public final class Machine: @unchecked Sendable {
         let child = spawnChild(of: process, scope: op.bodyScope, routine: process.frame.routine,
                                op: op.bodyStart, homeProcessor: requested, ports: [])
         child.ports = try resolvePorts(op.ports, child)
+        endStatement(child, 0)
         process.children.append(child.id)
     }
 
@@ -1015,7 +1076,7 @@ public final class Machine: @unchecked Sendable {
         var refs: [MemoryRef] = []
         for port in ports {
             let ref = try address(of: port, process)
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else { continue }
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else { continue }
             buffer.receiverProcess = process.id
             buffer.receiverPortIndex = refs.count
             refs.append(ref)
@@ -1027,9 +1088,20 @@ public final class Machine: @unchecked Sendable {
     /// A child copies the parent's current locals, per the manual.
     private func spawnChild(of parent: Process, scope: Scope, routine: Int, op: Int,
                             homeProcessor: Int?, ports: [MemoryRef]) -> Process {
+        // The child's only frame is a copy of the parent's innermost one, so references to
+        // that frame are rebased to frame 0. References into the parent's callers keep
+        // pointing at the parent's frames, so `var` parameters still reach the caller.
+        let parentFrame = parent.frames.count - 1
+        let varParams = parent.frame.varParams.map { ref -> MemoryRef in
+            guard case .local(let frame) = ref.segment else { return ref }
+            let segment: Segment = frame == parentFrame
+                ? .local(frame: 0)
+                : .processLocal(process: parent.id, frame: frame)
+            return MemoryRef(segment: segment, address: ref.address)
+        }
         let frame = Frame(routine: routine, op: op, scope: scope,
                           slots: parent.frame.slots,
-                          varParams: parent.frame.varParams,
+                          varParams: varParams,
                           blockMarkers: parent.frame.blockMarkers,
                           scopeMarkers: parent.frame.scopeMarkers)
         let id = nextProcessID
@@ -1158,25 +1230,31 @@ public final class Machine: @unchecked Sendable {
     // MARK: Input / output
 
     private func performWrite(_ process: Process, _ items: [WriteItem], newline: Bool) throws {
+        // Format everything before writing: an item can block on a channel, and the retried
+        // statement must not print the items before it a second time.
+        var text = ""
         for item in items {
             let value = try evaluate(item.value, process)
             let width = try item.width.map { try evaluate($0, process).asInteger ?? 0 }
             let decimals = try item.decimals.map { try evaluate($0, process).asInteger ?? 0 }
-            output += Format.write(value, width: width, decimals: decimals)
+            text += Format.write(value, width: width, decimals: decimals)
         }
-        if newline { output += "\n" }
+        if newline { text += "\n" }
+        output += text
     }
 
     func performRead(_ process: Process, _ targets: [Expression], newline: Bool) throws {
         for target in targets {
             let type = staticType(of: target, process)
-            skipInputWhitespace()
             if type.isNumeric {
+                // Numbers may be separated by blanks and line breaks, as in Pascal.
+                skipInputWhitespace(acrossLines: true)
                 var token = ""
                 if let character = peekInput(), character == "-" || character == "+" {
                     token.append(consumeInput())
                 }
-                while let character = peekInput(), character.isNumber || character == "." {
+                while let character = peekInput(),
+                      character.isASCII && (character.isNumber || character == ".") {
                     token.append(consumeInput())
                 }
                 guard !token.isEmpty else {
@@ -1203,9 +1281,11 @@ public final class Machine: @unchecked Sendable {
         if newline { skipInputLine() }
     }
 
-    /// True once the input source is exhausted, for the `Eof` function.
+    /// True once the input source is exhausted, for the `Eof` function. Being at the end
+    /// of the last line counts, so `while not eof do read(x)` stops after the last value.
     var atEndOfInput: Bool {
-        inputLine >= inputLines.count && inputColumn == 0
+        inputLine >= inputLines.count
+            || (inputLine == inputLines.count - 1 && inputColumn >= inputLines[inputLine].count)
     }
 
     /// True at the end of the current input line, for the `Eoln` function.
@@ -1217,25 +1297,30 @@ public final class Machine: @unchecked Sendable {
         guard inputLine < inputLines.count else { return nil }
         let line = inputLines[inputLine]
         guard inputColumn < line.count else { return nil }
-        return Array(line)[inputColumn]
+        return line[inputColumn]
     }
 
-    private func skipInputWhitespace() {
-        while let character = peekInput(), character == " " || character == "\t" {
-            _ = consumeInput()
+    private func skipInputWhitespace(acrossLines: Bool) {
+        while inputLine < inputLines.count {
+            if let character = peekInput() {
+                guard character == " " || character == "\t" else { return }
+                inputColumn += 1
+            } else if acrossLines {
+                skipInputLine()
+            } else {
+                return
+            }
         }
     }
 
+    /// Takes the next character. At the end of a line this yields the blank that stands
+    /// for the line break and moves to the next line, as Pascal's `Read` of a CHAR does.
     private func consumeInput() -> Character {
-        guard inputLine < inputLines.count else { return " " }
-        let characters = Array(inputLines[inputLine])
-        guard inputColumn < characters.count else { return " " }
-        let character = characters[inputColumn]
-        inputColumn += 1
-        if inputColumn >= characters.count {
-            inputColumn = 0
-            inputLine += 1
+        guard let character = peekInput() else {
+            skipInputLine()
+            return " "
         }
+        inputColumn += 1
         return character
     }
 
@@ -1246,11 +1331,10 @@ public final class Machine: @unchecked Sendable {
 
     // MARK: Pointers
 
+    /// `New(p)` always allocates a fresh cell, even when `p` already points somewhere;
+    /// other pointers to the old cell keep it.
     private func performNew(_ process: Process, _ target: Expression) throws {
         let ref = try address(of: target, process)
-        let current = try load(ref: ref, type: .pointer(.integer), process: process)
-        guard case .pointer(nil) = current else { return }
-        rawStore(ref: ref, value: .pointer(CellBox(.integer(0))))
         storeLocal(process, ref, value: .pointer(CellBox(.integer(0))))
     }
 
