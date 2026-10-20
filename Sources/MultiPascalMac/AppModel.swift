@@ -344,19 +344,9 @@ final class MPWinAppModel: ObservableObject {
             current.start()
             machine = current
         }
-        current.breakpoints = breakpoints
-        let outcome = current.step()
-        apply(snapshot: SimulationSnapshot(
-            machine: current,
-            outcome: outcome,
-            output: current.output,
-            metrics: current.metrics,
-            processes: current.status,
-            processorLoad: current.processorLoad,
-            profile: current.profile,
-            processorActivity: current.processorActivity,
-            activityTraceTruncated: current.activityTraceTruncated))
-        statusMessage = outcomeStatus(outcome)
+        // A single statement can call a function that never returns, so the step runs
+        // off the main thread where Stop can still cancel it.
+        startBackgroundRun(program: program, machine: current, action: .step)
     }
 
     func reset() {
@@ -577,13 +567,21 @@ final class MPWinAppModel: ObservableObject {
          UTType(filenameExtension: "pascal") ?? .plainText]
     }
 
-    private func startBackgroundRun(program: CompiledProgram, machine existingMachine: Machine?) {
+    private enum BackgroundAction { case run, step }
+
+    private func startBackgroundRun(program: CompiledProgram, machine existingMachine: Machine?,
+                                    action: BackgroundAction = .run) {
         let opID = UUID()
         operationID = opID
         isRunning = true
-        statusMessage = existingMachine == nil ? "Running…" : "Continuing…"
-        selectedTab = .output
-        diagnostics = ""
+        switch action {
+        case .run:
+            statusMessage = existingMachine == nil ? "Running…" : "Continuing…"
+            selectedTab = .output
+            diagnostics = ""
+        case .step:
+            statusMessage = "Stepping…"
+        }
         let configuredBreakpoints = breakpoints
         let configuredOptions = options
         let token = existingMachine == nil ? SimulationCancellation() : cancellationToken
@@ -592,9 +590,9 @@ final class MPWinAppModel: ObservableObject {
             let snapshot = await Task.detached(priority: .userInitiated) {
                 let current = existingMachine ?? Machine(program: program, options: configuredOptions, cancellation: token)
                 current.breakpoints = configuredBreakpoints
-                current.collectProfile = true
+                if action == .run { current.collectProfile = true }
                 if existingMachine == nil { current.start() }
-                let outcome = current.run()
+                let outcome = action == .step ? current.step() : current.run()
                 return SimulationSnapshot(
                     machine: current,
                     outcome: outcome,
@@ -612,6 +610,7 @@ final class MPWinAppModel: ObservableObject {
             // Keep the token: the machine holds it, and Continue after a breakpoint
             // reuses it, so Stop must still be able to cancel that run.
             statusMessage = outcomeStatus(snapshot.outcome)
+            guard action == .run else { return }
             switch snapshot.outcome {
             case .deadlock:
                 selectedTab = .processes

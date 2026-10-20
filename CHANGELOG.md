@@ -17,3 +17,4 @@ Notable project changes are recorded here. This file begins with the 1.1 develop
 - Fixed uninitialized procedure locals, `VAR` parameters bound to a caller's local variable, and `NEW` on a non-nil pointer.
 - Parameterless functions can now be called without parentheses.
 - Stop now interrupts endless loops inside functions and works after Continue from a breakpoint.
+- Step runs off the main thread, so a step into a non-returning function no longer freezes the app.
