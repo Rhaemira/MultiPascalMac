@@ -20,7 +20,11 @@ extension Machine {
         case .nilLiteral: return .pointer(.integer)
 
         case .identifier(let name, _):
-            guard let binding = process.frame.scope.lookup(name) else { return .integer }
+            guard let binding = process.frame.scope.lookup(name) else {
+                // An unbound name can still be a parameterless function call.
+                guard let index = program.routine(named: name).first else { return .integer }
+                return program.routines[index].resultType
+            }
             return type(of: binding)
 
         case .index(let base, let subscripts, _):
@@ -96,13 +100,21 @@ extension Machine {
             switch binding {
             case .global(let ref, _): return ref
             case .localSlot(let slot, _), .functionResult(let slot, _), .loopIndex(let slot, _):
-                return .localSlot(slot)
+                return .localSlot(slot, frame: process.frames.count - 1)
             case .varParam(let index, _):
                 guard index < process.frame.varParams.count else {
                     throw MPWinError.semantic(Diagnostic(.error,
                         "Error in the indicated expression.", location))
                 }
-                return process.frame.varParams[index]
+                let ref = process.frame.varParams[index]
+                if case .local = ref.segment, frameIndex(of: ref, process) == nil {
+                    // A FORALL/FORK child only has a copy of its parent's innermost frame,
+                    // so a caller's local variable passed by reference is out of reach.
+                    throw MPWinError.runtime(Diagnostic(.error,
+                        "VAR parameter \(name) refers to a local variable of a calling routine, which a spawned process cannot access.",
+                        location))
+                }
+                return ref
             case .constant:
                 throw MPWinError.semantic(Diagnostic(.error, "Error in Variable Name", location))
             case .typeAlias:
@@ -196,7 +208,7 @@ extension Machine {
     func load(ref: MemoryRef, type: TypeInfo, process: Process) throws -> Value {
         // A channel-typed location reads from the channel, which may block.
         if case .channelOf = type {
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to read a channel that is not initialised",
                     SourceLocation(line: 0, column: 0)))
@@ -225,18 +237,18 @@ extension Machine {
             }
             return .record(values)
         default:
-            if case .local = ref.segment {
-                guard ref.address >= 0, ref.address < process.frame.slots.count,
-                      let value = process.frame.slots[ref.address] else {
-                    return .void
-                }
-                return value
-            }
-            return try rawLoad(ref: ref)
+            return try rawLoad(ref: ref, process: process)
         }
     }
 
-    func rawLoad(ref: MemoryRef) throws -> Value {
+    /// The index into `process.frames` a local reference denotes, when that frame exists.
+    func frameIndex(of ref: MemoryRef, _ process: Process) -> Int? {
+        guard case .local(let frame) = ref.segment,
+              frame >= 0, frame < process.frames.count else { return nil }
+        return frame
+    }
+
+    func rawLoad(ref: MemoryRef, process: Process) throws -> Value {
         switch ref.segment {
         case .shared:
             guard ref.address >= 0, ref.address < sharedMemory.count,
@@ -245,7 +257,12 @@ extension Machine {
             }
             return value
         case .local:
-            return .void
+            guard let frame = frameIndex(of: ref, process),
+                  ref.address >= 0, ref.address < process.frames[frame].slots.count,
+                  let value = process.frames[frame].slots[ref.address] else {
+                return .void
+            }
+            return value
         case .cell(let box):
             return box[ref.address] ?? .void
         }
@@ -264,18 +281,21 @@ extension Machine {
         }
     }
 
-    /// Stores into a process-local slot.
+    /// Stores into a process-local slot, or into shared/pointer memory for other references.
     func storeLocal(_ process: Process, _ ref: MemoryRef, value: Value) {
         guard case .local = ref.segment else {
             rawStore(ref: ref, value: value)
             return
         }
-        let frame = process.frame
-        guard ref.address >= 0 && ref.address < Self.maximumPointerCells else { return }
-        var slots = frame.slots
-        while slots.count <= ref.address { slots.append(nil) }
-        slots[ref.address] = value
-        process.frame.slots = slots
+        guard let frame = frameIndex(of: ref, process),
+              ref.address >= 0 && ref.address < Self.maximumPointerCells else { return }
+        // Mutate in place: copying the slot array on every store made large local
+        // arrays quadratic to fill.
+        if process.frames[frame].slots.count <= ref.address {
+            process.frames[frame].slots.append(contentsOf:
+                repeatElement(nil, count: ref.address - process.frames[frame].slots.count + 1))
+        }
+        process.frames[frame].slots[ref.address] = value
     }
 
     func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
@@ -312,7 +332,7 @@ extension Machine {
     func store(ref: MemoryRef, type: TypeInfo, value: Value, target: Expression,
                process: Process) throws {
         if case .channelOf = type {
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to write to a channel that is not initialised", target.location))
             }
@@ -340,16 +360,12 @@ extension Machine {
             }
             return
         case .spinlock:
-            if case .local = ref.segment { storeLocal(process, ref, value: .boolean(value.truthy)) }
-            else { rawStore(ref: ref, value: .boolean(value.truthy)) }
+            storeLocal(process, ref, value: .boolean(value.truthy))
             return
         default:
             break
         }
-        switch ref.segment {
-        case .local: storeLocal(process, ref, value: coerced)
-        default: rawStore(ref: ref, value: coerced)
-        }
+        storeLocal(process, ref, value: coerced)
     }
 
     private func coerce(_ value: Value, to type: TypeInfo, at location: SourceLocation) throws -> Value {
@@ -442,14 +458,20 @@ extension Machine {
         // address path (otherwise a runtime expression such as `N` in `1 to N`
         // incorrectly reports "Error in Variable Name").
         switch expression {
-        case .identifier(let name, _):
-            if case .constant(let value, _)? = process.frame.scope.lookup(name) {
+        case .identifier(let name, let location):
+            let binding = process.frame.scope.lookup(name)
+            if case .constant(let value, _)? = binding {
                 return value
+            }
+            // Pascal calls a parameterless function without parentheses: `x := Next;`.
+            if binding == nil, let index = program.routine(named: name).first,
+               program.routines[index].isFunction {
+                return try evaluateCall(name, [], location, process)
             }
             let ref = try address(of: expression, process)
             let type = staticType(of: expression, process)
             if case .channelOf = type {
-                guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+                guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                     throw MPWinError.runtime(Diagnostic(.error,
                         "Attempt to read a channel that is not initialised", expression.location))
                 }
@@ -460,7 +482,7 @@ extension Machine {
             let ref = try address(of: expression, process)
             let type = staticType(of: expression, process)
             if case .channelOf = type {
-                guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+                guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                     throw MPWinError.runtime(Diagnostic(.error,
                         "Attempt to read a channel that is not initialised", expression.location))
                 }
@@ -521,7 +543,7 @@ extension Machine {
                                                      location))
             }
             let ref = try address(of: inner, process)
-            guard case .channel(let buffer) = try rawLoad(ref: ref) else {
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to test a channel that is not initialised", location))
             }
@@ -570,6 +592,9 @@ extension Machine {
     private func runInline(_ process: Process, depth: Int) throws -> Value {
         var captured = Value.void
         while process.frames.count > depth {
+            // The scheduler only checks between statements, and this loop runs a whole
+            // function inside one, so an endless loop here must check for itself.
+            if isCancelled { throw Interrupt.cancelled }
             let frame = process.frames[process.frames.count - 1]
             let routine = program.routines[frame.routine]
             guard frame.op < routine.code.count else {

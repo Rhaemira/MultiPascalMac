@@ -292,8 +292,9 @@ public enum Segment: Sendable, Hashable {
     /// Shared memory: the single segment of a `Shared` architecture, segment 0 of any
     /// other topology, and therefore always the same storage.
     case shared
-    /// A slot in the running process's own frame.
-    case local
+    /// A slot in one of the running process's frames, identified by its index in the
+    /// call stack so a `var` parameter keeps referring to the caller's variable.
+    case local(frame: Int)
     /// A location reached through a `^` dereference.
     case cell(CellBox)
 }
@@ -306,8 +307,8 @@ public struct MemoryRef: Sendable, Hashable {
         self.address = address
     }
     public static let sharedZero = MemoryRef(segment: .shared, address: 0)
-    public static func localSlot(_ slot: Int) -> MemoryRef {
-        MemoryRef(segment: .local, address: slot)
+    public static func localSlot(_ slot: Int, frame: Int) -> MemoryRef {
+        MemoryRef(segment: .local(frame: frame), address: slot)
     }
 }
 

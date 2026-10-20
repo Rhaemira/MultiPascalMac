@@ -931,6 +931,159 @@ final class MPWinCoreTests: XCTestCase {
         XCTAssertTrue(String(describing: outcome).contains("EXPRESSION EVALUATION OVERFLOW"))
     }
 
+    func testReadAndReadlnAcrossLines() throws {
+        let readln = try run("""
+        program Test;
+        var x, y: Integer;
+        begin
+          readln(x);
+          readln(y);
+          writeln(x, ' ', y);
+        end.
+        """, input: "5\n7\n")
+        XCTAssertEqual(readln.output, "5 7\n")
+
+        let read = try run("""
+        program Test;
+        var x, y: Integer;
+        begin
+          read(x);
+          read(y);
+          writeln(x, ' ', y);
+        end.
+        """, input: "5\n7\n")
+        XCTAssertEqual(read.output, "5 7\n")
+    }
+
+    func testEofLoopStopsAfterLastLine() throws {
+        let source = """
+        program Test;
+        var x, total, count: Integer;
+        begin
+          total := 0;
+          count := 0;
+          while not eof do
+          begin
+            readln(x);
+            total := total + x;
+            count := count + 1;
+          end;
+          writeln(count, ' ', total);
+        end.
+        """
+        XCTAssertEqual(try run(source, input: "5\n7\n").output, "2 12\n")
+        XCTAssertEqual(try run(source, input: "5\r\n7").output, "2 12\n")
+    }
+
+    func testReadCharacterAtEndOfLineYieldsBlank() throws {
+        let machine = try run("""
+        program Test;
+        var a, b, c: Char;
+        begin
+          read(a);
+          read(b);
+          read(c);
+          writeln(a, b, c);
+        end.
+        """, input: "x\ny\n")
+        XCTAssertEqual(machine.output, "x y\n")
+    }
+
+    func testProcedureLocalsStartWithDefaults() throws {
+        let machine = try run("""
+        program Test;
+        procedure P(base: Integer);
+        var a: array [1..3] of Integer;
+            i: Integer;
+        begin
+          i := i + base;
+          a[2] := a[1] + 5;
+          writeln(i, ' ', a[2]);
+        end;
+        begin
+          P(4);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "4 5\n")
+    }
+
+    func testVarParameterUpdatesCallersLocal() throws {
+        // The callee has a local of its own in the slot the caller's variable uses,
+        // so resolving the reference in the wrong frame would silently print 10.
+        let machine = try run("""
+        program Test;
+        procedure Bump(var n: Integer);
+        var own: Integer;
+        begin
+          own := 99;
+          n := n + 1;
+        end;
+        procedure Outer;
+        var k: Integer;
+        begin
+          k := 10;
+          Bump(k);
+          writeln(k);
+        end;
+        begin
+          Outer;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "11\n")
+    }
+
+    func testNewAllocatesFreshCell() throws {
+        let machine = try run("""
+        program Test;
+        var p, q: ^Integer;
+        begin
+          new(p);
+          p^ := 1;
+          q := p;
+          new(p);
+          p^ := 2;
+          writeln(q^, ' ', p^);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "1 2\n")
+    }
+
+    func testCancellationStopsEndlessLoopInsideFunction() throws {
+        let program = try compile("""
+        program Test;
+        function Spin(start: Integer): Integer;
+        var i: Integer;
+        begin
+          i := start;
+          while true do i := i + 1;
+          Spin := i;
+        end;
+        var x: Integer;
+        begin
+          x := Spin(0);
+        end.
+        """)
+        let token = SimulationCancellation()
+        let machine = Machine(program: program, options: ProgramOptions(timing: .free),
+                              cancellation: token)
+        machine.start()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { token.cancel() }
+        XCTAssertEqual(machine.run(), .cancelled)
+    }
+
+    func testParameterlessFunctionCallWithoutParentheses() throws {
+        let machine = try run("""
+        program Test;
+        function Answer: Integer;
+        begin
+          Answer := 42;
+        end;
+        var x: Integer;
+        begin
+          x := Answer + 1;
+          writeln(x);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "43\n")
+    }
 }
-
-

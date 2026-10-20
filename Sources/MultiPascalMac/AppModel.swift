@@ -331,6 +331,9 @@ final class MPWinAppModel: ObservableObject {
             guard compile() else { return }
         }
         guard let program = compiledProgram else { return }
+        // A stopped machine's token stays cancelled, so stepping it again would only
+        // report "Stopped". Start over instead, as Continue does.
+        if case .cancelled? = lastOutcome { machine = nil }
         let current: Machine
         if let machine {
             current = machine
@@ -384,19 +387,26 @@ final class MPWinAppModel: ObservableObject {
         }
         breakpoints.insert(line)
         breakpointText = ""
-        machine?.breakpoints = breakpoints
+        syncMachineBreakpoints()
         statusMessage = "Breakpoint added · line \(line)"
     }
 
     func removeBreakpoint(_ line: Int) {
         breakpoints.remove(line)
-        machine?.breakpoints = breakpoints
+        syncMachineBreakpoints()
     }
 
     func clearBreakpoints() {
         breakpoints.removeAll()
-        machine?.breakpoints.removeAll()
+        syncMachineBreakpoints()
         statusMessage = "Breakpoints cleared"
+    }
+
+    /// The background run reads `machine.breakpoints`, so it is only written while idle;
+    /// the next Run/Continue copies `breakpoints` into the machine anyway.
+    private func syncMachineBreakpoints() {
+        guard !isRunning else { return }
+        machine?.breakpoints = breakpoints
     }
 
     func stop() {
@@ -599,7 +609,8 @@ final class MPWinAppModel: ObservableObject {
             guard operationID == opID else { return }
             apply(snapshot: snapshot)
             isRunning = false
-            cancellationToken = nil
+            // Keep the token: the machine holds it, and Continue after a breakpoint
+            // reuses it, so Stop must still be able to cancel that run.
             statusMessage = outcomeStatus(snapshot.outcome)
             switch snapshot.outcome {
             case .deadlock:
@@ -626,6 +637,8 @@ final class MPWinAppModel: ObservableObject {
     }
 
     private func invalidateExecution(clearMachine: Bool) {
+        // Drop the result of any run still in flight, so it cannot overwrite this state.
+        operationID = UUID()
         cancellationToken?.cancel()
         cancellationToken = nil
         isRunning = false
