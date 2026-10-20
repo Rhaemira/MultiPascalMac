@@ -18,3 +18,4 @@ Notable project changes are recorded here. This file begins with the 1.1 develop
 - Parameterless functions can now be called without parentheses.
 - Stop now interrupts endless loops inside functions and works after Continue from a breakpoint.
 - Step runs off the main thread, so a step into a non-returning function no longer freezes the app.
+- A function that blocks (for example on a channel read) is no longer called a second time when its statement resumes, and `WRITE` no longer repeats output when an item blocks.

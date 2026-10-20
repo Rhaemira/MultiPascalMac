@@ -588,14 +588,32 @@ extension Machine {
         guard let index = program.routine(named: name).first else {
             throw MPWinError.semantic(Diagnostic(.error, "Error in Variable Name", location))
         }
-        let depth = process.frames.count
-        try performCall(process, index, arguments, returnOffset: 0)
-        return try runInline(process, depth: depth)
+        let caller = process.frames.count - 1
+        let slot: Int
+        let cursor = process.frames[caller].callCursor
+        if cursor < process.frames[caller].callResults.count {
+            // The statement is being retried after a suspension.
+            let recorded = process.frames[caller].callResults[cursor]
+            if let value = recorded.value {
+                process.frames[caller].callCursor = recorded.next
+                return value
+            }
+            // The call never got under way (its arguments blocked): reuse its entry.
+            slot = cursor
+        } else {
+            slot = process.frames[caller].callResults.count
+            process.frames[caller].callResults.append(Frame.CallResult(value: nil, next: 0))
+        }
+        process.frames[caller].callCursor = slot + 1
+        try performCall(process, index, arguments, returnOffset: 0, callResultIndex: slot)
+        try runInline(process, depth: caller + 1)
+        let recorded = process.frames[caller].callResults[slot]
+        process.frames[caller].callCursor = recorded.next
+        return recorded.value ?? .void
     }
 
     /// Runs a called function to completion inside the current statement.
-    private func runInline(_ process: Process, depth: Int) throws -> Value {
-        var captured = Value.void
+    private func runInline(_ process: Process, depth: Int) throws {
         while process.frames.count > depth {
             // The scheduler only checks between statements, and this loop runs a whole
             // function inside one, so an endless loop here must check for itself.
@@ -604,24 +622,22 @@ extension Machine {
             let frame = process.frames[process.frames.count - 1]
             let routine = program.routines[frame.routine]
             guard frame.op < routine.code.count else {
-                if let slot = routine.resultSlot, let value = frame.slots[slot] {
-                    captured = value
-                }
                 try leaveRoutine(process)
                 continue
             }
             let op = routine.code[frame.op]
             do {
+                let frameIndex = beginStatement(process)
                 try step(process, op, line: 0)
+                endStatement(process, frameIndex)
             } catch let suspend as Suspend {
-                // A blocking operation inside a function re-enters it on resume; the
-                // functions in the original's sample programs are free of side effects
-                // across such a suspension.
+                // The function's frames stay on the stack: on resume the process finishes
+                // the function, records its result in the caller's frame and retries the
+                // caller's statement, which then replays that result (see `evaluateCall`).
                 process.resumePending = false
                 throw suspend
             }
         }
-        return captured
     }
 
     private func evaluateBuiltin(_ builtin: Builtin, _ arguments: [Expression],

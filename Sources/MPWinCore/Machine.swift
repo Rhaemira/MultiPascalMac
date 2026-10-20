@@ -133,10 +133,25 @@ struct Frame {
     /// Saved caller state, so the machine can return without a dedicated return opcode.
     var returnAddress: ReturnAddress?
     var executed: Int = 0
+    /// Results of the functions called by the statement this frame is executing. When the
+    /// statement blocks and is retried, finished calls return their recorded result instead
+    /// of running (and repeating their side effects) again.
+    var callResults: [CallResult] = []
+    var callCursor = 0
+    /// Where the caller records this frame's result, when it was called from an expression.
+    var callResultIndex: Int?
 
     struct ReturnAddress {
         var routine: Int
         var op: Int
+    }
+
+    struct CallResult {
+        /// `nil` while the call is still in progress.
+        var value: Value?
+        /// The cursor position after this call, so a replay skips the calls made while
+        /// evaluating its arguments.
+        var next: Int
     }
 
     init(routine: Int, op: Int, scope: Scope, slots: [Value?], varParams: [MemoryRef] = [],
@@ -544,7 +559,9 @@ public final class Machine: @unchecked Sendable {
                 let activityProcessor = activityProcessorIndex(for: process)
                 let activityStart = processorBusyTime[activityProcessor]
                 do {
+                    let frameIndex = beginStatement(process)
                     try step(process, op, line: line)
+                    endStatement(process, frameIndex)
                     recordActivity(process: process, processor: activityProcessor, line: line,
                                    label: activityLabel(for: op), kind: .instruction,
                                    startTime: activityStart,
@@ -789,6 +806,20 @@ public final class Machine: @unchecked Sendable {
         process.frame.op += 1
     }
 
+    /// Starts (or retries) the statement in the innermost frame; returns that frame's index.
+    func beginStatement(_ process: Process) -> Int {
+        let index = process.frames.count - 1
+        process.frames[index].callCursor = 0
+        return index
+    }
+
+    /// The statement finished, so its recorded call results are no longer needed.
+    func endStatement(_ process: Process, _ index: Int) {
+        guard index < process.frames.count else { return }
+        process.frames[index].callResults.removeAll()
+        process.frames[index].callCursor = 0
+    }
+
     /// `Duration n` suspends the process for `n` simulated time units. The wake time is
     /// remembered across the suspend so the retry does not start a new wait.
     private func performDuration(_ process: Process, _ value: Expression) throws {
@@ -818,7 +849,7 @@ public final class Machine: @unchecked Sendable {
     // MARK: Calls and returns
 
     func performCall(_ process: Process, _ index: Int, _ arguments: [Argument],
-                      returnOffset: Int = 1) throws {
+                      returnOffset: Int = 1, callResultIndex: Int? = nil) throws {
         let callee = program.routines[index]
         let returnAddress = Frame.ReturnAddress(routine: process.frame.routine,
                                                 op: process.frame.op + returnOffset)
@@ -854,6 +885,7 @@ public final class Machine: @unchecked Sendable {
         frame.slots = slots
         frame.varParams = varParams
         frame.returnAddress = returnAddress
+        frame.callResultIndex = callResultIndex
         // Defaults go in after the arguments; this only fills slots that are still empty.
         initializeFrame(&frame, using: callee.scope)
         process.frames.append(frame)
@@ -905,12 +937,16 @@ public final class Machine: @unchecked Sendable {
             process.frames.removeLast()
             var caller = process.frames[process.frames.count - 1]
             caller.op = back.op
-            process.frames[process.frames.count - 1] = caller
-            if let resultSlot = program.routines[back.routine].resultSlot {
+            if let index = frame.callResultIndex, index < caller.callResults.count {
                 // A function result lives in the callee's frame, so it is copied out
-                // before the frame is discarded.
-                _ = resultSlot
+                // before the frame is discarded. This also covers a function that
+                // blocked and finished later, after its statement was abandoned.
+                let resultSlot = program.routines[frame.routine].resultSlot
+                let value = resultSlot.flatMap { $0 < frame.slots.count ? frame.slots[$0] : nil }
+                caller.callResults[index] = Frame.CallResult(value: value ?? .void,
+                                                             next: caller.callCursor)
             }
+            process.frames[process.frames.count - 1] = caller
             return
         }
         try performBodyEnd(process)
@@ -1190,13 +1226,17 @@ public final class Machine: @unchecked Sendable {
     // MARK: Input / output
 
     private func performWrite(_ process: Process, _ items: [WriteItem], newline: Bool) throws {
+        // Format everything before writing: an item can block on a channel, and the retried
+        // statement must not print the items before it a second time.
+        var text = ""
         for item in items {
             let value = try evaluate(item.value, process)
             let width = try item.width.map { try evaluate($0, process).asInteger ?? 0 }
             let decimals = try item.decimals.map { try evaluate($0, process).asInteger ?? 0 }
-            output += Format.write(value, width: width, decimals: decimals)
+            text += Format.write(value, width: width, decimals: decimals)
         }
-        if newline { output += "\n" }
+        if newline { text += "\n" }
+        output += text
     }
 
     func performRead(_ process: Process, _ targets: [Expression], newline: Bool) throws {

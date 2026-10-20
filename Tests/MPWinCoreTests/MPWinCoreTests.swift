@@ -1146,4 +1146,70 @@ final class MPWinCoreTests: XCTestCase {
         machine.start()
         XCTAssertEqual(machine.run(), .timeLimitExceeded)
     }
+
+    func testFunctionThatBlocksIsNotCalledAgainOnRetry() throws {
+        // Each Take blocks until the forked writer sends a value. Before the fix the
+        // retried statement called Take(10) again, which consumed the second value and
+        // left Take(20) waiting forever.
+        let machine = try run("""
+        program Test;
+        shared calls: Integer;
+        var c: Channel of Integer;
+        function Take(k: Integer): Integer;
+        begin
+          calls := calls + 1;
+          Take := c + k;
+        end;
+        var x: Integer;
+        begin
+          fork begin duration(50); c := 1; c := 2 end;
+          x := Take(10) + Take(20);
+          writeln(x, ' ', calls);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "33 2\n")
+    }
+
+    func testNestedAndArgumentCallsAreReplayedAfterBlocking() throws {
+        let machine = try run("""
+        program Test;
+        shared calls: Integer;
+        var c: Channel of Integer;
+        function Take(k: Integer): Integer;
+        begin
+          calls := calls + 1;
+          Take := c + k;
+        end;
+        function Outer(k: Integer): Integer;
+        begin
+          calls := calls + 100;
+          Outer := Take(k) * 2;
+        end;
+        function Add(a, b: Integer): Integer;
+        begin
+          calls := calls + 1000;
+          Add := a + b;
+        end;
+        var x, y: Integer;
+        begin
+          fork begin duration(50); c := 1; duration(50); c := 2; duration(50); c := 3 end;
+          x := Outer(10);
+          y := Add(Take(0), c);
+          writeln(x, ' ', y, ' ', calls);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "22 5 1102\n")
+    }
+
+    func testWriteThatBlocksPrintsEachItemOnce() throws {
+        let machine = try run("""
+        program Test;
+        var c: Channel of Integer;
+        begin
+          fork begin duration(50); c := 7 end;
+          writeln('value: ', c);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "value: 7\n")
+    }
 }
