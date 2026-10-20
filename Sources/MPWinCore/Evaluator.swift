@@ -418,15 +418,31 @@ extension Machine {
 
     // MARK: - Channels
 
-    /// Takes one packet from a channel, blocking until one arrives.
+    /// Takes one packet from a channel, blocking until one arrives. Like a function result,
+    /// a packet taken by a statement that later blocks is recorded, so the retried statement
+    /// gets the same packet instead of consuming another one.
     func readChannel(_ buffer: ChannelBuffer, ref: MemoryRef, process: Process) throws -> Value {
-        if !buffer.queue.isEmpty {
-            let value = buffer.queue.removeFirst()
-            chargeChannelOperation()
+        let frame = process.frames.count - 1
+        let cursor = process.frames[frame].callCursor
+        if cursor < process.frames[frame].callResults.count,
+           let value = process.frames[frame].callResults[cursor].value {
+            process.frames[frame].callCursor = process.frames[frame].callResults[cursor].next
             return value
         }
-        process.waitingOn = buffer
-        throw Suspend.block(.channelRead(ref), readyAt: nil)
+        guard !buffer.queue.isEmpty else {
+            process.waitingOn = buffer
+            throw Suspend.block(.channelRead(ref), readyAt: nil)
+        }
+        let value = buffer.queue.removeFirst()
+        chargeChannelOperation()
+        let recorded = Frame.CallResult(value: value, next: cursor + 1)
+        if cursor < process.frames[frame].callResults.count {
+            process.frames[frame].callResults[cursor] = recorded
+        } else {
+            process.frames[frame].callResults.append(recorded)
+        }
+        process.frames[frame].callCursor = cursor + 1
+        return value
     }
 
     /// Puts one packet on a channel and wakes a reader waiting for it.

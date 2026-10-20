@@ -1212,4 +1212,29 @@ final class MPWinCoreTests: XCTestCase {
         """)
         XCTAssertEqual(machine.output, "value: 7\n")
     }
+
+    func testChannelReadIsNotRepeatedWhenStatementRetries() throws {
+        // Values arrive one at a time, so each statement blocks after its first read.
+        for expression in ["Add(c, Take(0))", "c + Take(0)", "c + c"] {
+            let machine = try run("""
+            program Test;
+            var c: Channel of Integer;
+            function Take(k: Integer): Integer;
+            begin
+              Take := c + k;
+            end;
+            function Add(a, b: Integer): Integer;
+            begin
+              Add := a + b;
+            end;
+            var y: Integer;
+            begin
+              fork begin duration(50); c := 1; duration(50); c := 2 end;
+              y := \(expression);
+              writeln(y);
+            end.
+            """)
+            XCTAssertEqual(machine.output, "3\n", expression)
+        }
+    }
 }

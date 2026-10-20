@@ -1035,6 +1035,9 @@ public final class Machine: @unchecked Sendable {
                 child.processor = try validatedProcessor(requested)
             }
             child.ports = try resolvePorts(op.ports, child)
+            // Those expressions ran outside any statement of the child; don't let the
+            // child's first statement replay their results.
+            endStatement(child, 0)
             if groupFirst < groupLast {
                 child.forallContinuation = ForallContinuation(
                     nextIndex: groupFirst + 1,
@@ -1065,6 +1068,7 @@ public final class Machine: @unchecked Sendable {
         let child = spawnChild(of: process, scope: op.bodyScope, routine: process.frame.routine,
                                op: op.bodyStart, homeProcessor: requested, ports: [])
         child.ports = try resolvePorts(op.ports, child)
+        endStatement(child, 0)
         process.children.append(child.id)
     }
 
