@@ -303,29 +303,81 @@ extension Machine {
         process.frames[frame].slots[ref.address] = value
     }
 
-    func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
-        switch type {
-        case .array(let element, let lower, let upper):
-            guard case .array(let values) = value else { break }
-            let count = zip(lower, upper).reduce(1) { $0 * max(0, $1.1 - $1.0 + 1) }
-            let stride = max(1, element.footprint)
-            for index in 0..<min(count, values.count) {
-                storeGlobal(MemoryRef(segment: .shared, address: ref.address + index * stride),
-                            type: element, value: values[index])
-            }
-            return
-        case .record(let fields):
-            guard case .record(let values) = value else { break }
-            for (index, field) in fields.enumerated() where index < values.count {
-                storeGlobal(MemoryRef(segment: .shared, address: ref.address + field.offset),
-                            type: field.type, value: values[index])
-            }
-            return
-        default:
-            break
+    
+func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
+    switch type {
+    case .channelOf(_):
+        // Every channel location must have its own buffer.
+        if case .channel(_) = value {
+            rawStore(ref: ref, value: value)
+        } else {
+            rawStore(ref: ref, value: type.defaultValue)
         }
+        return
+
+    case .array(let element, let lower, let upper):
+        let count = zip(lower, upper).reduce(1) {
+            $0 * max(0, $1.1 - $1.0 + 1)
+        }
+        let stride = max(1, element.footprint)
+
+        // Arrays default to .void, so initialise every element
+        // even when no explicit array value was supplied.
+        let values: [Value]
+        if case .array(let initialValues) = value {
+            values = initialValues
+        } else {
+            values = []
+        }
+
+        for index in 0..<count {
+            let elementValue: Value =
+                index < values.count
+                ? values[index]
+                : element.defaultValue
+
+            storeGlobal(
+                MemoryRef(
+                    segment: .shared,
+                    address: ref.address + index * stride
+                ),
+                type: element,
+                value: elementValue
+            )
+        }
+        return
+
+    case .record(let fields):
+        // Records also default to .void, so initialise their fields.
+        let values: [Value]
+        if case .record(let initialValues) = value {
+            values = initialValues
+        } else {
+            values = []
+        }
+
+        for (index, field) in fields.enumerated() {
+            let fieldValue: Value =
+                index < values.count
+                ? values[index]
+                : field.type.defaultValue
+
+            storeGlobal(
+                MemoryRef(
+                    segment: .shared,
+                    address: ref.address + field.offset
+                ),
+                type: field.type,
+                value: fieldValue
+            )
+        }
+        return
+
+    default:
         rawStore(ref: ref, value: value)
     }
+}
+
 
     /// Assignment: `target := value`, including whole array/record copies and channel sends.
     func store(_ target: Expression, _ value: Value, _ process: Process) throws {
