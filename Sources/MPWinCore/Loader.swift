@@ -88,6 +88,12 @@ public struct Loader {
         }
         let mainRoutine = try compileMain(globalScope: globalScope)
 
+        // Derive breakpointable lines from the final compiled source maps.
+        // StatementCompiler modifies a value-copy of Loader, so its
+        // executable-line annotations do not propagate back to this instance.
+        let allRoutines = [mainRoutine] + compiled
+        executableLines = Set(allRoutines.flatMap(\.lines).filter { $0 > 0 })
+
         let architecture = try unit.architecture.map { spec in
             let total = spec.topology.processorCount(parameter: spec.parameter)
             guard spec.parameter > 0 else {
@@ -106,7 +112,7 @@ public struct Loader {
         return CompiledProgram(
             name: unit.programName,
             architecture: architecture,
-            routines: [mainRoutine] + compiled,
+            routines: allRoutines,
             mainRoutine: 0,
             globalScope: globalScope,
             globalFootprint: nextAddress,
