@@ -18,7 +18,32 @@ final class MPWinCoreTests: XCTestCase {
         return machine
     }
 
+    
+    func testExecutableLinesAreDerivedFromCompiledSourceMap() throws {
+        let program = try compile("""
+        program BreakpointCheck;
+        Architecture Shared(2);
+        var x, y: Integer;
+        begin
+          x := 10;
+          y := x + 5;
+          x := y * 2;
+          writeln('Final x = ', x);
+          writeln('Final y = ', y);
+        end.
+        """)
 
+        XCTAssertTrue(program.executableLines.contains(5), "First assignment should be executable")
+        XCTAssertTrue(program.executableLines.contains(6), "Second assignment should be executable")
+        XCTAssertTrue(program.executableLines.contains(7), "Third assignment should be executable")
+        XCTAssertTrue(program.executableLines.contains(8), "Writeln should be executable")
+        XCTAssertTrue(program.executableLines.contains(9), "Writeln should be executable")
+        XCTAssertFalse(program.executableLines.contains(1), "Program header is not executable")
+        XCTAssertFalse(program.executableLines.contains(2), "Architecture declaration is not executable")
+        XCTAssertFalse(program.executableLines.contains(3), "Variable declaration is not executable")
+        XCTAssertFalse(program.executableLines.isEmpty, "Compiled programs must expose breakpointable lines")
+    }
+    
     func testPascalConstTypeSharedParameterlessProcedureAndForallSynchronization() throws {
         let machine = try run("""
         program RankSortParallel;
