@@ -1286,6 +1286,11 @@ public final class Machine: @unchecked Sendable {
     }
 
     private func terminate(_ process: Process) {
+        for buffer in process.portBuffers where buffer.receiverProcessID == process.id {
+            buffer.receiverProcessID = nil
+            wakeReaders(of: buffer)
+        }
+        process.portBuffers.removeAll()
         if let held = process.heldLock {
             storeLocal(process, held, value: .boolean(false))
             process.heldLock = nil
