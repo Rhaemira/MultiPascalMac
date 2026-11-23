@@ -511,9 +511,11 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
         _ = target
     }
 
-    private func wakeReaders(of buffer: ChannelBuffer) {
+    func wakeReaders(of buffer: ChannelBuffer) {
         for other in processes where other.state == .blocked && !other.terminated {
-            if case .channelRead = other.blockReason, other.waitingOn === buffer {
+            if case .channelRead = other.blockReason,
+               other.waitingOn === buffer,
+               buffer.receiverProcessID == nil || buffer.receiverProcessID == other.id {
                 makeRunnable(other)
             }
         }
