@@ -156,6 +156,8 @@ public struct RecordField: Sendable, Equatable {
 public final class ChannelBuffer: @unchecked Sendable {
     private var values: [Value] = []
     private var head = 0
+    /// The single process permitted to receive from this channel when assigned by PORT.
+    var receiverProcessID: Int?
 
     public init() {}
 
