@@ -1087,20 +1087,107 @@ public final class Machine: @unchecked Sendable {
         }
         let child = spawnChild(of: process, scope: op.bodyScope, routine: process.frame.routine,
                                op: op.bodyStart, homeProcessor: requested)
-        try validatePorts(op.ports, child)
-        endStatement(child, 0)
-        process.children.append(child.id)
+        do {
+            try validatePorts(op.ports, child)
+            endStatement(child, 0)
+            process.children.append(child.id)
+        } catch {
+            discardUnstartedChild(child)
+            throw error
+        }
     }
 
+    /// Resolves PORT operands before a child can execute and atomically assigns each
+    /// listed channel's one receive slot to that child.
     private func validatePorts(_ ports: [Expression], _ process: Process) throws {
-        var channelCount = 0
+        var buffers: [ChannelBuffer] = []
+        var seen = Set<ObjectIdentifier>()
+
         for port in ports {
             let ref = try address(of: port, process)
-            if case .channel = try rawLoad(ref: ref, process: process) {
-                channelCount += 1
+            let type = staticType(of: port, process)
+            try collectPortBuffers(type, at: ref, process: process,
+                                   location: port.location, into: &buffers, seen: &seen)
+        }
+
+        // Do not partially claim a port list: validate all ownership conflicts first.
+        for buffer in buffers {
+            if let receiver = buffer.receiverProcessID, receiver != process.id {
+                throw MPWinError.runtime(Diagnostic(.error,
+                    "Channel already has receiver process \(receiver).",
+                    SourceLocation(line: 0, column: 0)))
+            }
+            if processes.contains(where: {
+                $0.id != process.id && $0.state == .blocked &&
+                $0.waitingOn === buffer && !$0.terminated
+            }) {
+                throw MPWinError.runtime(Diagnostic(.error,
+                    "Channel already has a blocked reader and cannot be assigned with PORT.",
+                    SourceLocation(line: 0, column: 0)))
             }
         }
-        if channelCount > 0 { charge(timing.portSetup) }
+
+        for buffer in buffers {
+            buffer.receiverProcessID = process.id
+            if !process.portBuffers.contains(where: { $0 === buffer }) {
+                process.portBuffers.append(buffer)
+            }
+        }
+        if !buffers.isEmpty { charge(timing.portSetup) }
+    }
+
+    private func collectPortBuffers(_ type: TypeInfo, at ref: MemoryRef,
+                                    process: Process, location: SourceLocation,
+                                    into buffers: inout [ChannelBuffer],
+                                    seen: inout Set<ObjectIdentifier>) throws {
+        switch type {
+        case .channelOf:
+            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else {
+                throw MPWinError.runtime(Diagnostic(.error,
+                    "PORT refers to an uninitialised channel.", location))
+            }
+            if seen.insert(ObjectIdentifier(buffer)).inserted {
+                buffers.append(buffer)
+            }
+
+        case .array(let element, _, _):
+            let stride = element.footprint
+            guard stride > 0, stride != Int.max else {
+                throw MPWinError.runtime(Diagnostic(.error,
+                    "PORT array has an invalid storage layout.", location))
+            }
+            let elementCount = type.footprint / stride
+            for index in 0..<elementCount {
+                let (offset, multiplyOverflow) = index.multipliedReportingOverflow(by: stride)
+                let (address, addOverflow) = ref.address.addingReportingOverflow(offset)
+                guard !multiplyOverflow, !addOverflow else {
+                    throw MPWinError.runtime(Diagnostic(.error,
+                        "PORT array address overflowed.", location))
+                }
+                try collectPortBuffers(element,
+                    at: MemoryRef(segment: ref.segment, address: address),
+                    process: process, location: location, into: &buffers, seen: &seen)
+            }
+
+        default:
+            throw MPWinError.semantic(Diagnostic(.error,
+                "PORT operands must be channels or arrays of channels.", location))
+        }
+    }
+
+    /// Rolls back a child that failed during setup, before it has been allowed to run.
+    /// Process IDs remain stable because they are the indices in processes.
+    private func discardUnstartedChild(_ child: Process) {
+        runQueue.removeAll { $0 == child.id }
+        for buffer in child.portBuffers where buffer.receiverProcessID == child.id {
+            buffer.receiverProcessID = nil
+            wakeReaders(of: buffer)
+        }
+        child.portBuffers.removeAll()
+        child.state = .terminated
+        child.blockReason = nil
+        child.waitingOn = nil
+        child.frames.removeAll()
     }
 
     /// A child copies the parent's current locals, per the manual.
