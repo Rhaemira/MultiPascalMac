@@ -182,6 +182,8 @@ final class Process {
     var heldLock: MemoryRef?
     /// The channel this process is trying to read, while blocked.
     var waitingOn: ChannelBuffer?
+    /// Channels this process owns as their designated receiver through PORT.
+    var portBuffers: [ChannelBuffer] = []
     var blockReason: BlockReason?
     var readyAt: Int?
     /// Steps remaining in the current time slice.
