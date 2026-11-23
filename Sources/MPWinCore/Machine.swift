@@ -530,7 +530,7 @@ public final class Machine: @unchecked Sendable {
     }
 
     private func updateParallelTimeMetric() {
-        metrics.parallelTime = processorBusyTime.max() ?? 0
+        metrics.parallelTime = max(processorBusyTime.max() ?? 0, parallelElapsedFloor)
     }
 
     // MARK: Interpreter
