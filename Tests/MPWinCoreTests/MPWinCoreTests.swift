@@ -479,6 +479,58 @@ final class MPWinCoreTests: XCTestCase {
         XCTAssertEqual(Set(machine.status.map(\.processor)), [0, 1, 2, 3])
     }
 
+    func testPortAssignsReceiverAndReleasesOwnershipOnExit() throws {
+        let machine = try run("""
+        program PortReceiver;
+        var c: Channel of Integer;
+        begin
+          fork (Port c) begin
+            writeln(c);
+          end;
+          c := 42;
+          join;
+          c := 99;
+          writeln(c);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "42\n99\n")
+    }
+
+    func testPortCanAssignEveryChannelInAnArray() throws {
+        let machine = try run("""
+        program PortArray;
+        var channels: array[0..1] of Channel of Integer;
+        begin
+          fork (Port channels) begin
+            writeln(channels[0]);
+            writeln(channels[1]);
+          end;
+          channels[0] := 11;
+          channels[1] := 22;
+          join;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "11\n22\n")
+    }
+
+    func testPortRejectsSecondLiveReceiverForSameChannel() throws {
+        let program = try compile("""
+        program DuplicatePort;
+        var c: Channel of Integer;
+        begin
+          fork (Port c) duration(10);
+          fork (Port c) writeln(c);
+        end.
+        """)
+        let machine = Machine(program: program, options: ProgramOptions(timing: .free))
+        machine.start()
+        let outcome = machine.run()
+        guard case .runtimeError(let message) = outcome else {
+            return XCTFail("Expected duplicate PORT receiver to fail, got \(outcome)")
+        }
+        XCTAssertTrue(message.contains("Channel already has receiver process"))
+    }
+
     func testExplicitProcessorAndPortPrefix() throws {
         let machine = try run("""
         program Test;
