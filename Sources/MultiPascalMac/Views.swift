@@ -34,6 +34,17 @@ struct ContentView: View {
             case .about: AboutView()
             }
         }
+        .alert("Unsaved Changes", isPresented: $model.showingUnsavedChangesAlert) {
+            Button("Save") { model.savePendingDocumentAction() }
+            Button("Discard Changes", role: .destructive) {
+                model.discardPendingDocumentChanges()
+            }
+            Button("Cancel", role: .cancel) {
+                model.cancelPendingDocumentAction()
+            }
+        } message: {
+            Text("Save your changes before replacing this document? Unsaved source will otherwise be lost.")
+        }
     }
 
     private var appHeader: some View {
@@ -355,10 +366,8 @@ struct ContentView: View {
                     OutputView(text: model.output)
                 case .processes:
                     ProcessTableView(processes: model.processes)
-                case .metrics:
-                    MetricsView(model: model)
-                case .activity:
-                    ActivityView(model: model)
+                case .analysis:
+                    AnalysisView(model: model)
                 case .diagnostics:
                     DiagnosticsView(text: model.diagnostics)
                 }
@@ -447,7 +456,7 @@ struct OutputView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 450)
-remove duplicated primary actions from empty state                    Spacer(minLength: 24)
+                    Spacer(minLength: 24)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
@@ -460,6 +469,37 @@ remove duplicated primary actions from empty state                    Spacer(min
                         .padding(16)
                 }
             }
+        }
+    }
+}
+
+struct AnalysisView: View {
+    @ObservedObject var model: MPWinAppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Analysis", selection: $model.selectedAnalysisTab) {
+                    Text("Metrics").tag(MPWinAppModel.AnalysisTab.metrics)
+                    Text("Activity").tag(MPWinAppModel.AnalysisTab.activity)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 210)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            Divider()
+            Group {
+                switch model.selectedAnalysisTab {
+                case .metrics:
+                    MetricsView(model: model)
+                case .activity:
+                    ActivityView(model: model)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -1122,8 +1162,7 @@ struct AboutView: View {
     var body: some View {
         VStack(spacing: 14) {
             Group {
-                if let iconURL = Bundle.main.url(forResource: "AppIconPreview", withExtension: "png")
-                    ?? Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+                if let iconURL = Bundle.main.url(forResource: "AppIconPreview", withExtension: "png"),
                    let iconImage = NSImage(contentsOf: iconURL) {
                     Image(nsImage: iconImage)
                         .resizable()
