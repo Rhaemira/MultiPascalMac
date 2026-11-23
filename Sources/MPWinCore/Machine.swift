@@ -176,8 +176,10 @@ final class Process {
     var state: ProcessState = .ready
     var processor = 0
     var frames: [Frame]
-    /// The `Duration` wake time carried across a suspend/resume cycle.
+    /// The `Duration` wake time on the scheduler's event-loop clock.
     var pendingWakeAt: Int?
+    /// The corresponding parallel-elapsed deadline, excluding other processors' summed work.
+    var pendingParallelWakeAt: Int?
     /// The spinlock this process currently holds, if any.
     var heldLock: MemoryRef?
     /// The channel this process is trying to read, while blocked.
