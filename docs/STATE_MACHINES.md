@@ -124,10 +124,10 @@ The app accepts only executable source lines from the compiled source map. When 
 
 There are two deliberately different clocks:
 
-- `time` is the deterministic event-loop clock used by duration wakeups and the time alarm.
-- `metrics.parallelTime` is the maximum accumulated simulated workload across virtual processors.
+- `time` is the deterministic event-loop clock used by duration wakeups and the time alarm. It accumulates costs as the single-threaded scheduler processes events.
+- `metrics.parallelTime` is the maximum accumulated simulated workload on any virtual processor, with completed `DURATION` intervals contributing an elapsed-time floor. It does not sum independent processors' work.
 
-CLOCK now reads the latter, matching the recovered MPWin description of parallel elapsed time. Processor activity records executed instruction and context-switch events; profile sampling is controlled by `profileSampleStep`. The former activity-sampling setting was miswired to profile collection and has been removed.
+CLOCK reads the parallel elapsed value. A process records both its event-loop wake deadline and the corresponding parallel-time deadline when it begins `DURATION`; the latter is committed when the scheduler wakes it. Processor activity records executed instruction and context-switch events; profile sampling is controlled by `profileSampleStep`. The former activity-sampling setting was miswired to profile collection and has been removed.
 
 ## 10. Remaining state and semantic gaps
 
