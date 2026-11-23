@@ -862,6 +862,7 @@ public final class Machine: @unchecked Sendable {
                 throw Suspend.block(.duration, readyAt: wakeAt)
             }
             process.pendingWakeAt = nil
+            process.pendingParallelWakeAt = nil
             advance(process)
             return
         }
