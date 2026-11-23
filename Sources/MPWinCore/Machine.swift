@@ -466,7 +466,7 @@ public final class Machine: @unchecked Sendable {
             !$0.terminated && $0.readyAt.map { $0 <= time } == true
         }
         if !due.isEmpty {
-            for process in due { makeRunnable(process) }
+            for process in due { wakeDuration(process) }
             return
         }
 
