@@ -872,12 +872,14 @@ public final class Machine: @unchecked Sendable {
             return
         }
         let (wakeAt, overflow) = time.addingReportingOverflow(units)
-        guard !overflow else {
+        let (parallelWakeAt, parallelOverflow) = metrics.parallelTime.addingReportingOverflow(units)
+        guard !overflow, !parallelOverflow else {
             throw MPWinError.runtime(Diagnostic(.error,
                 "Simulated time overflowed the supported integer range.",
                 SourceLocation(line: 0, column: 0)))
         }
         process.pendingWakeAt = wakeAt
+        process.pendingParallelWakeAt = parallelWakeAt
         throw Suspend.block(.duration, readyAt: wakeAt)
     }
 
