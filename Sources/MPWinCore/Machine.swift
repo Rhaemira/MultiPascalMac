@@ -243,6 +243,8 @@ public final class Machine: @unchecked Sendable {
     /// so wall time is governed by the busiest processor rather than the sum of
     /// all processors' work.
     public private(set) var processorBusyTime: [Int]
+    /// Minimum elapsed parallel time established by completed DURATION waits.
+    private var parallelElapsedFloor = 0
     private var activeProcessor: Int?
     /// Source lines at which execution stopped for the debugger.
     public private(set) var stoppedAtLine: Int?
