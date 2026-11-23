@@ -326,7 +326,7 @@ public final class Machine: @unchecked Sendable {
             }
             if isCancelled {
                 metrics.processCount = processes.count
-                metrics.parallelTime = time
+                updateParallelTimeMetric()
                 return .cancelled
             }
             // A breakpoint leaves the process positioned on the statement.
@@ -376,7 +376,7 @@ public final class Machine: @unchecked Sendable {
         while executed < maxSteps {
             if isCancelled {
                 metrics.processCount = processes.count
-                metrics.parallelTime = time
+                updateParallelTimeMetric()
                 return .cancelled
             }
             // A breakpoint is consumed by the execute loop; clearing it here lets
