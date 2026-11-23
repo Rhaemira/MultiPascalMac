@@ -14,7 +14,7 @@ The application parses the MPWin/Multi-Pascal teaching-language source into an A
 | Primitive types | Integer, real, boolean, char; plus pointer, channel, spinlock, arrays and records |
 | Expressions | Arithmetic, comparisons, boolean/bitwise operators, precedence, built-ins and mixed integer/real arithmetic |
 | Statements | Assignment, blocks, `IF`, `CASE`, `WHILE`, `REPEAT`, `FOR`, `FORALL`, `FORK`, `JOIN`, read/write and memory operations |
-| Parallel-language model | `FORALL` creation and synchronization, grouping, processor placement, channels, spinlocks and processor/topology accounting; PORT currently has limited setup-only behavior |
+| Parallel-language model | `FORALL` creation and synchronization, grouping, processor placement, `PORT` single-receiver channel assignment, channels, spinlocks and processor/topology accounting |
 | Syntax validation | Statement sequences require semicolon separators; declaration entries require their semicolons; `END.` requires the final period. Valid trailing semicolons and intentional empty statements are preserved. |
 | Debugging/inspection | Step/continue/stop, breakpoints, source-line diagnostics, process state, bounded processor-local operation/context-switch trace, and estimated timing metrics |
 | Scheduling | Round-Robin and seeded Random; unsupported scheduler policies are not exposed |
