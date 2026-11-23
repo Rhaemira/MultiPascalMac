@@ -98,11 +98,13 @@ This is an interpreter-level continuation mechanism. It is essential to the corr
 
 ## 6. Channel lifecycle
 
-Each channel is a reference-backed FIFO buffer. Sending appends a value and wakes blocked readers; reading removes one value or blocks if the FIFO is empty. A read result is also recorded in the current frame so a statement retry does not consume a second value.
+Each channel is a reference-backed FIFO buffer. Sending appends a value and wakes the eligible blocked reader; reading removes one value or blocks if the FIFO is empty. A read result is also recorded in the current frame so a statement retry does not consume a second value.
 
-Local arrays containing channels must create a distinct buffer for every element. The local-array initializer previously repeated one reference-backed default value; a regression test now checks independent buffers and indexed channel reads.
+`PORT` assigns one spawned process as the sole receiver of each listed channel. Any process may send. A receiver cannot be reassigned while another receiver owns the channel, and ownership is released when the receiver terminates. Arrays of channels expand into their individual channel buffers when passed to `PORT`.
 
-Current limitation: the queue is unbounded. The former `capacity` field was not enforced and has been removed rather than suggesting that back-pressure existed.
+Local arrays containing channels must create a distinct buffer for every element. Regression tests cover independent buffers, indexed channel reads, scalar receiver assignment, array receiver assignment, and conflicting receivers.
+
+Current limitation: the queue is unbounded. The former `capacity` field was not enforced and has been removed rather than suggesting that back-pressure existed. Congestion, packet capacity, physical link routing, and processor-to-processor distance are not modeled; multicomputer channel operations pay a fixed link-delay cost.
 
 ## 7. READ / READLN input cursor
 
