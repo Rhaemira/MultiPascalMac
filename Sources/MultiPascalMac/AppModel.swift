@@ -20,8 +20,7 @@ final class MPWinAppModel: ObservableObject {
     enum ResultsTab: String, CaseIterable, Identifiable {
         case output = "Output"
         case processes = "Processes"
-        case metrics = "Metrics"
-        case activity = "Activity"
+        case analysis = "Analysis"
         case diagnostics = "Diagnostics"
 
         var id: String { rawValue }
@@ -29,11 +28,16 @@ final class MPWinAppModel: ObservableObject {
             switch self {
             case .output: return "terminal"
             case .processes: return "person.3.sequence"
-            case .metrics: return "speedometer"
-            case .activity: return "chart.bar.xaxis"
+            case .analysis: return "chart.xyaxis.line"
             case .diagnostics: return "exclamationmark.triangle"
             }
         }
+    }
+
+    enum AnalysisTab: String, CaseIterable, Identifiable {
+        case metrics = "Metrics"
+        case activity = "Activity"
+        var id: String { rawValue }
     }
 
     struct SampleProgram: Identifiable, Hashable {
@@ -237,10 +241,20 @@ final class MPWinAppModel: ObservableObject {
     @Published var breakpointText = ""
     @Published var breakpoints: Set<Int> = []
     @Published var activeSheet: ActiveSheet?
+    @Published var showingUnsavedChangesAlert = false
+    @Published var selectedAnalysisTab: AnalysisTab = .metrics
     @Published var inputText = ""
     @Published private(set) var inputSourceName: String?
     @Published var options = ProgramOptions()
 
+    private enum PendingDocumentAction {
+        case new
+        case sample(SampleProgram)
+        case openPanel
+        case openURL(URL)
+    }
+
+    private var pendingDocumentAction: PendingDocumentAction?
     private var suppressDirtyTracking = false
     private var operationID = UUID()
     private var cancellationToken: SimulationCancellation?
@@ -427,6 +441,73 @@ final class MPWinAppModel: ObservableObject {
     // MARK: Documents / samples
 
     func newFile() {
+        requestDocumentReplacement(.new)
+    }
+
+    func openSample(_ sample: SampleProgram) {
+        requestDocumentReplacement(.sample(sample))
+    }
+
+    func openSource() {
+        requestDocumentReplacement(.openPanel)
+    }
+
+    func loadSource(url: URL) {
+        requestDocumentReplacement(.openURL(url))
+    }
+
+    func saveSource() {
+        _ = saveCurrentDocument()
+    }
+
+    func saveSourceAs() {
+        _ = saveCurrentDocumentAs()
+    }
+
+    func savePendingDocumentAction() {
+        guard let action = pendingDocumentAction else { return }
+        guard saveCurrentDocument() else {
+            pendingDocumentAction = nil
+            return
+        }
+        pendingDocumentAction = nil
+        performDocumentReplacement(action)
+    }
+
+    func discardPendingDocumentChanges() {
+        guard let action = pendingDocumentAction else { return }
+        pendingDocumentAction = nil
+        performDocumentReplacement(action)
+    }
+
+    func cancelPendingDocumentAction() {
+        pendingDocumentAction = nil
+    }
+
+    private func requestDocumentReplacement(_ action: PendingDocumentAction) {
+        guard !isRunning else { return }
+        guard isDirty else {
+            performDocumentReplacement(action)
+            return
+        }
+        pendingDocumentAction = action
+        showingUnsavedChangesAlert = true
+    }
+
+    private func performDocumentReplacement(_ action: PendingDocumentAction) {
+        switch action {
+        case .new:
+            createNewFile()
+        case .sample(let sample):
+            replaceWithSample(sample)
+        case .openPanel:
+            presentOpenPanel()
+        case .openURL(let url):
+            readSource(url: url)
+        }
+    }
+
+    private func createNewFile() {
         operationID = UUID()
         suppressDirtyTracking = true
         source = Self.starterSource
@@ -441,7 +522,7 @@ final class MPWinAppModel: ObservableObject {
         statusMessage = "New document"
     }
 
-    func openSample(_ sample: SampleProgram) {
+    private func replaceWithSample(_ sample: SampleProgram) {
         operationID = UUID()
         suppressDirtyTracking = true
         source = sample.source
@@ -458,16 +539,16 @@ final class MPWinAppModel: ObservableObject {
         statusMessage = "Loaded sample · \(sample.name)"
     }
 
-    func openSource() {
+    private func presentOpenPanel() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = sourceFileTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        loadSource(url: url)
+        readSource(url: url)
     }
 
-    func loadSource(url: URL) {
+    private func readSource(url: URL) {
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             suppressDirtyTracking = true
@@ -486,20 +567,21 @@ final class MPWinAppModel: ObservableObject {
         }
     }
 
-    func saveSource() {
+    @discardableResult
+    private func saveCurrentDocument() -> Bool {
         if let url = fileURL {
-            writeSource(to: url)
-            return
+            return writeSource(to: url)
         }
-        saveSourceAs()
+        return saveCurrentDocumentAs()
     }
 
-    func saveSourceAs() {
+    @discardableResult
+    private func saveCurrentDocumentAs() -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [mpfType, .plainText]
         panel.nameFieldStringValue = (documentName == "Untitled" ? "Untitled" : URL(fileURLWithPath: documentName).deletingPathExtension().lastPathComponent) + ".mpf"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        writeSource(to: url)
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        return writeSource(to: url)
     }
 
     // MARK: Input
@@ -687,16 +769,19 @@ final class MPWinAppModel: ObservableObject {
         if clearMachine { machine = nil }
     }
 
-    private func writeSource(to url: URL) {
+    @discardableResult
+    private func writeSource(to url: URL) -> Bool {
         do {
             try source.write(to: url, atomically: true, encoding: .utf8)
             fileURL = url
             documentName = url.lastPathComponent
             isDirty = false
             statusMessage = "Saved · \(url.lastPathComponent)"
+            return true
         } catch {
             diagnostics = error.localizedDescription
             selectedTab = .diagnostics
+            return false
         }
     }
 
