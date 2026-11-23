@@ -34,7 +34,7 @@ The ruler is not an independent scroll view. It derives glyph positions from the
 | Compiled snapshot current | Compile succeeds | Any source edit, new/open/sample, or explicit recompile |
 | Compile failed | Parser/loader throws | Next successful compile or source replacement |
 
-Two independent facts are tracked: `isDirty` means the in-memory text differs from the saved document, while `compiledSource == source` means the compiled program corresponds to the current text. Compiling does not mark the file as saved. The app recompiles only when no compiled program exists or the source snapshot no longer matches.
+Two independent facts are tracked: `isDirty` means the in-memory text differs from the saved document, while `compiledSource == source` means the compiled program corresponds to the current text. Compiling does not mark the file as saved. New, Open, and sample replacement route through a Save / Discard / Cancel prompt when the source is dirty; a cancelled or failed save leaves the current document in place. The app recompiles only when no compiled program exists or the source snapshot no longer matches.
 
 ## 2. App operation lifecycle
 
@@ -57,7 +57,7 @@ A single `ActiveSheet?` now represents Parameters, Input, or About. This replace
 
 ## 3. Simulator and process scheduler
 
-**State holders:** `runQueue`, `Process.state`, `BlockReason`, `readyAt`, processor assignments, and the simulator's two time measures.
+**State holders:** `runQueue`, `Process.state`, `BlockReason`, `readyAt`, `pendingWakeAt`, `pendingParallelWakeAt`, processor assignments, and the simulator's two time measures.
 
 Process states:
 
@@ -72,7 +72,7 @@ The scheduler supports Round-Robin and seeded Random selection. The previous Sho
 `BlockReason` distinguishes channel reads, spinlocks, duration waits, JOIN, FORALL, and implicit child completion. The following fields refine that state:
 
 - `waitingOn` identifies the channel buffer being read.
-- `readyAt` and `pendingWakeAt` represent timed suspension.
+- `readyAt`, `pendingWakeAt`, and `pendingParallelWakeAt` represent scheduler and parallel-time deadlines for a DURATION suspension.
 - `heldLock` tracks a spinlock owned by the process.
 - `waitingForForallChildren` and `children` track structured child lifetimes.
 - `forallContinuation` stores the next grouped iteration.
@@ -86,7 +86,7 @@ These fields form a cross-product state machine. Invariants are enforced by sche
 
 A FORALL parent creates children, stores their IDs, and blocks until all of that FORALL's children terminate. A grouped child carries a continuation with its next and final index and loops through its inline body. A FORK parent continues immediately; the parent itself cannot terminate until its children finish. JOIN waits for one child termination per JOIN.
 
-The parent/child relationship is distinct from the global run queue: a child can be ready or blocked while its parent is blocked on a FORALL or waiting for children.
+The parent/child relationship is distinct from the global run queue: a child can be ready or blocked while its parent is blocked on a FORALL or waiting for children. FORK/FORALL setup validates PORT ownership before execution; failed setup removes newly queued children and releases any port claims.
 
 ## 5. Expression evaluation and statement replay
 
