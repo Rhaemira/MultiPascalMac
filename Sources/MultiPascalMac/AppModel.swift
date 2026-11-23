@@ -485,7 +485,6 @@ final class MPWinAppModel: ObservableObject {
     }
 
     private func requestDocumentReplacement(_ action: PendingDocumentAction) {
-        guard !isRunning else { return }
         guard isDirty else {
             performDocumentReplacement(action)
             return
