@@ -1149,7 +1149,6 @@ struct InputView: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .tint(MPTheme.purple)
-                .disabled(model.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(16)
         }
