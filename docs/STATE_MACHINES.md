@@ -131,7 +131,7 @@ CLOCK now reads the latter, matching the recovered MPWin description of parallel
 
 ## 10. Remaining state and semantic gaps
 
-- PORT expressions are resolved for a spawned child and port-setup cost is charged, but no persistent receiver binding or port-routed communication is implemented. The unused receiver fields and process-side port storage were removed.
-- Channel queues do not model packet capacity, congestion, or receiver-specific delivery.
+- PORT binds one process as each channel's receiver; bindings are released when that process terminates. Sender access remains unrestricted. Port ownership and channel wakeups are enforced by the runtime.
+- Channel queues do not model packet capacity, congestion, physical link routing, or distance-dependent delivery delay; multicomputer channel operations use a fixed link-delay cost.
 - The simulator is a deterministic single-threaded event loop; virtual processors are modeled, not native threads.
 - The macOS editor, sheets, file panels, and menu commands have not been validated by GUI automation in this source audit. The UI is a native SwiftUI/AppKit app, not a web page to be opened in Chrome.
