@@ -7,8 +7,6 @@ public enum ProcessState: String, Sendable, CaseIterable {
     /// Runnable, waiting for its turn on a processor.
     case ready
     case running
-    /// Its time slice expired before it finished.
-    case preempted
     /// Waiting on a channel read, a `Lock`, a `Duration`, a `Join` or a child process.
     case blocked
     case terminated
@@ -18,7 +16,6 @@ public enum ProcessState: String, Sendable, CaseIterable {
         switch self {
         case .ready: return "Ready"
         case .running: return "Running"
-        case .preempted: return "Preempted"
         case .blocked: return "Blocked"
         case .terminated: return "Terminated"
         }
@@ -92,6 +89,7 @@ public enum RunOutcome: Sendable, Equatable {
     case breakpoint(line: Int)
     case timeLimitExceeded
     case deadlock
+    case stepCompleted
     case stepLimitReached
     case cancelled
     case runtimeError(String)
@@ -100,6 +98,7 @@ public enum RunOutcome: Sendable, Equatable {
         if case .runtimeError = self { return true }
         if case .deadlock = self { return true }
         if case .timeLimitExceeded = self { return true }
+        if case .stepLimitReached = self { return true }
         return false
     }
 }
@@ -132,7 +131,6 @@ struct Frame {
     var scopeMarkers: [Scope]
     /// Saved caller state, so the machine can return without a dedicated return opcode.
     var returnAddress: ReturnAddress?
-    var executed: Int = 0
     /// Results of the functions called by the statement this frame is executing. When the
     /// statement blocks and is retried, finished calls return their recorded result instead
     /// of running (and repeating their side effects) again.
@@ -178,8 +176,6 @@ final class Process {
     var state: ProcessState = .ready
     var processor = 0
     var frames: [Frame]
-    /// True when the next step should retry the statement that suspended.
-    var resumePending = false
     /// The `Duration` wake time carried across a suspend/resume cycle.
     var pendingWakeAt: Int?
     /// The spinlock this process currently holds, if any.
@@ -194,10 +190,7 @@ final class Process {
     var sequential = false
     /// Children spawned by this process, in creation order.
     var children: [Int] = []
-    var executedStatements = 0
-    var createdAt = 0
     var sequentialTime = 0
-    var ports: [MemoryRef] = []
     var forallContinuation: ForallContinuation?
     /// Child process IDs belonging to the currently executing FORALL, when its parent is blocked.
     var waitingForForallChildren: [Int]?
@@ -313,7 +306,6 @@ public final class Machine: @unchecked Sendable {
     // MARK: Running
 
     public func run() -> RunOutcome {
-        var steps = 0
         var runIterations = 0
         while true {
             runIterations += 1
@@ -322,6 +314,8 @@ public final class Machine: @unchecked Sendable {
             // perfectly valid workloads and could even crash while inspecting a
             // terminated process whose frame had already been removed.
             if runIterations > 1_000_000 {
+                metrics.processCount = processes.count
+                updateParallelTimeMetric()
                 return .stepLimitReached
             }
             if isCancelled {
@@ -350,7 +344,6 @@ public final class Machine: @unchecked Sendable {
             metrics.switches += 1
             let outcome = execute(process, budget: sliceBudget(for: process))
             activeProcessor = nil
-            steps += outcome.executed
             updateParallelTimeMetric()
             if let message = outcome.error {
                 metrics.processCount = processes.count
@@ -358,8 +351,12 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
-            if outcome.timeLimitExceeded { return .timeLimitExceeded }
+            if outcome.timeLimitExceeded {
+                if process.state == .running { makeRunnable(process) }
+                return .timeLimitExceeded
+            }
             if outcome.cancelled {
+                if process.state == .running { makeRunnable(process) }
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
                 return .cancelled
@@ -378,6 +375,9 @@ public final class Machine: @unchecked Sendable {
             }
             // A breakpoint is consumed by the execute loop; clearing it here lets
             // the skipped statement execute when Step/Continue is invoked again.
+            if let limit = options.timeLimit, time >= limit {
+                return .timeLimitExceeded
+            }
             stoppedAtLine = nil
             guard let pid = dequeueRunnable() else {
                 return finish()
@@ -395,6 +395,9 @@ public final class Machine: @unchecked Sendable {
             let remaining = maxSteps - executed
             let outcome = execute(process, budget: min(sliceBudget(for: process), remaining))
             activeProcessor = nil
+            // A debugger step must yield even when SEQOFF normally lets a process
+            // retain the processor until its body ends.
+            if process.state == .running { makeRunnable(process) }
             executed += outcome.executed
             updateParallelTimeMetric()
             if let message = outcome.error {
@@ -403,14 +406,18 @@ public final class Machine: @unchecked Sendable {
                 return .runtimeError(message)
             }
             if outcome.stoppedForBreakpoint { return .breakpoint(line: stoppedAtLine ?? 0) }
-            if outcome.timeLimitExceeded { return .timeLimitExceeded }
+            if outcome.timeLimitExceeded {
+                if process.state == .running { makeRunnable(process) }
+                return .timeLimitExceeded
+            }
             if outcome.cancelled {
+                if process.state == .running { makeRunnable(process) }
                 metrics.processCount = processes.count
                 updateParallelTimeMetric()
                 return .cancelled
             }
         }
-        return .stepLimitReached
+        return .stepCompleted
     }
 
     private var contextSwitchCost: Int {
@@ -423,7 +430,6 @@ public final class Machine: @unchecked Sendable {
         var stoppedForBreakpoint = false
         var cancelled = false
         var timeLimitExceeded = false
-        var isSuccess: Bool { error == nil && !cancelled }
     }
 
     private func sliceBudget(for process: Process) -> Int {
@@ -435,7 +441,7 @@ public final class Machine: @unchecked Sendable {
         advanceTimeToNextWakeup()
         guard !runQueue.isEmpty else { return nil }
         switch options.policy {
-        case .roundRobin, .shortestJobFirst:
+        case .roundRobin:
             return runQueue.removeFirst()
         case .random where runQueue.count > 1:
             let index = Int(random.next() % UInt64(runQueue.count))
@@ -447,16 +453,30 @@ public final class Machine: @unchecked Sendable {
 
     /// Moves the virtual clock forward to the earliest `Duration` expiry.
     private func advanceTimeToNextWakeup() {
-        guard runQueue.isEmpty else { return }
-        var earliest: Int?
-        for process in processes where !process.terminated {
-            guard let readyAt = process.readyAt, readyAt > time else { continue }
-            if earliest == nil || readyAt < earliest! { earliest = readyAt }
+        // A timed process can become due while other processes are still runnable.
+        // Wake due processes before selecting the next queue entry; otherwise the
+        // clock can pass readyAt and the old "future only" scan would strand them.
+        let due = processes.filter {
+            !$0.terminated && $0.readyAt.map { $0 <= time } == true
         }
-        guard let earliest else { return }
-        time = earliest
-        for process in processes where !process.terminated && process.readyAt == earliest {
-            makeRunnable(process)
+        if !due.isEmpty {
+            for process in due { makeRunnable(process) }
+            return
+        }
+
+        guard runQueue.isEmpty else { return }
+        let nextWakeup = processes
+            .filter { !$0.terminated }
+            .compactMap { $0.readyAt }
+            .min()
+        guard let nextWakeup else { return }
+
+        time = max(time, nextWakeup)
+        metrics.time = time
+        for process in processes where !process.terminated {
+            if let readyAt = process.readyAt, readyAt <= time {
+                makeRunnable(process)
+            }
         }
     }
 
@@ -469,7 +489,9 @@ public final class Machine: @unchecked Sendable {
             metrics.deadlocked = true
             return .deadlock
         }
-        return .completed
+        return .runtimeError(
+            "Scheduler invariant violated: live processes remain but none are runnable."
+        )
     }
 
     // MARK: Scheduling
@@ -479,7 +501,6 @@ public final class Machine: @unchecked Sendable {
         process.readyAt = nil
         process.blockReason = nil
         process.waitingOn = nil
-        process.resumePending = false
         process.slice = timing.contextSwitchLimit
         runQueue.append(process.id)
     }
@@ -525,7 +546,6 @@ public final class Machine: @unchecked Sendable {
                 do {
                     try leaveRoutine(process)
                 } catch let suspend as Suspend {
-                    process.resumePending = true
                     switch suspend {
                     case .block(let reason, let readyAt): block(process, reason, readyAt: readyAt)
                     }
@@ -541,70 +561,69 @@ public final class Machine: @unchecked Sendable {
                 continue
             }
 
-            if process.resumePending {
-                process.resumePending = false
-            } else {
-                let op = routine.code[frame.op]
-                let line = frame.op < routine.lines.count ? routine.lines[frame.op] : 0
-                if process.skipBreakpointOnce {
-                    process.skipBreakpointOnce = false
-                } else if line > 0, breakpoints.contains(line) {
-                    stoppedAtLine = line
-                    process.skipBreakpointOnce = true
-                    outcome.stoppedForBreakpoint = true
-                    // Keep the process runnable so Continue/Step can resume it.
-                    makeRunnable(process)
-                    return outcome
-                }
-                let activityProcessor = activityProcessorIndex(for: process)
-                let activityStart = processorBusyTime[activityProcessor]
-                do {
-                    let frameIndex = beginStatement(process)
-                    try step(process, op, line: line)
-                    endStatement(process, frameIndex)
-                    recordActivity(process: process, processor: activityProcessor, line: line,
-                                   label: activityLabel(for: op), kind: .instruction,
-                                   startTime: activityStart,
-                                   endTime: processorBusyTime[activityProcessor])
-                } catch let suspend as Suspend {
-                    recordActivity(process: process, processor: activityProcessor, line: line,
-                                   label: activityLabel(for: op), kind: .instruction,
-                                   startTime: activityStart,
-                                   endTime: processorBusyTime[activityProcessor])
-                    process.resumePending = true
-                    switch suspend {
-                    case .block(let reason, let readyAt): block(process, reason, readyAt: readyAt)
-                    }
-                    return outcome
-                } catch Interrupt.cancelled {
-                    outcome.cancelled = true
-                    return outcome
-                } catch Interrupt.timeLimitExceeded {
-                    outcome.timeLimitExceeded = true
-                    return outcome
-                } catch let error as MPWinError {
-                    outcome.error = error.description
-                    return outcome
-                } catch {
-                    outcome.error = "\(error)"
-                    return outcome
-                }
-                steps += 1
-                outcome.executed = steps
-                metrics.executedStatements += 1
-                if !process.sequential {
-                    let sequentialCost = timing.sequentialCost(of: op)
-                    metrics.sequentialTime += sequentialCost
-                    process.sequentialTime += sequentialCost
-                }
-                process.executedStatements += 1
-                processorLoad[min(process.processor, processorCount - 1)] += 1
-                stepCounter += 1
-                if collectProfile {
-                    sample(process, line: line)
-                }
-                if process.terminated { return outcome }
+            if let limit = options.timeLimit, time >= limit {
+                outcome.timeLimitExceeded = true
+                return outcome
             }
+
+            let op = routine.code[frame.op]
+            let line = frame.op < routine.lines.count ? routine.lines[frame.op] : 0
+            if process.skipBreakpointOnce {
+                process.skipBreakpointOnce = false
+            } else if line > 0, breakpoints.contains(line) {
+                stoppedAtLine = line
+                process.skipBreakpointOnce = true
+                outcome.stoppedForBreakpoint = true
+                // Keep the process runnable so Continue/Step can resume it.
+                makeRunnable(process)
+                return outcome
+            }
+            let activityProcessor = activityProcessorIndex(for: process)
+            let activityStart = processorBusyTime[activityProcessor]
+            do {
+                let frameIndex = beginStatement(process)
+                try step(process, op, line: line)
+                endStatement(process, frameIndex)
+                recordActivity(process: process, processor: activityProcessor, line: line,
+                               label: activityLabel(for: op), kind: .instruction,
+                               startTime: activityStart,
+                               endTime: processorBusyTime[activityProcessor])
+            } catch let suspend as Suspend {
+                recordActivity(process: process, processor: activityProcessor, line: line,
+                               label: activityLabel(for: op), kind: .instruction,
+                               startTime: activityStart,
+                               endTime: processorBusyTime[activityProcessor])
+                switch suspend {
+                case .block(let reason, let readyAt): block(process, reason, readyAt: readyAt)
+                }
+                return outcome
+            } catch Interrupt.cancelled {
+                outcome.cancelled = true
+                return outcome
+            } catch Interrupt.timeLimitExceeded {
+                outcome.timeLimitExceeded = true
+                return outcome
+            } catch let error as MPWinError {
+                outcome.error = error.description
+                return outcome
+            } catch {
+                outcome.error = "\(error)"
+                return outcome
+            }
+            steps += 1
+            outcome.executed = steps
+            metrics.executedStatements += 1
+            if !process.sequential {
+                let sequentialCost = timing.sequentialCost(of: op)
+                metrics.sequentialTime += sequentialCost
+                process.sequentialTime += sequentialCost
+            }
+            processorLoad[min(process.processor, processorCount - 1)] += 1
+            stepCounter += 1
+            if collectProfile {
+                sample(process, line: line)
+            }
+            if process.terminated { return outcome }
         }
         if !process.sequential {
             process.slice = max(0, process.slice - steps)
@@ -665,7 +684,7 @@ public final class Machine: @unchecked Sendable {
     }
 
     private func sample(_ process: Process, line: Int) {
-        let step = max(1, timing.activitySampleStep)
+        let step = max(1, timing.profileSampleStep)
         guard stepCounter % step == 0,
               profileSamples.count < Self.maximumProfileSamples else { return }
         profileSamples.append(ProfileSample(time: time, processID: process.id,
@@ -857,8 +876,6 @@ public final class Machine: @unchecked Sendable {
         var varParams: [MemoryRef] = []
         var frame = Frame(routine: index, op: 0, scope: callee.scope, slots: slots,
                           varParams: varParams)
-        var valueCursor = 0
-        var varCursor = 0
         for (position, parameter) in callee.parameters.enumerated() {
             let argument = position < arguments.count ? arguments[position] : nil
             switch parameter.binding {
@@ -867,21 +884,16 @@ public final class Machine: @unchecked Sendable {
                 let value = try argumentValue(argument, type: type, process: process)
                 storeValueInSlots(value, type: type, slots: &slots, at: slot)
                 charge(timing.parameter)
-                valueCursor += 1
             case .varParam(let index, _):
                 guard let argument else { continue }
                 let ref = try address(of: argument.value, process)
                 while varParams.count <= index { varParams.append(MemoryRef.sharedZero) }
                 varParams[index] = ref
                 charge(timing.parameter)
-                varCursor += 1
             default:
                 break
             }
         }
-        _ = valueCursor
-        _ = varCursor
-
         frame.slots = slots
         frame.varParams = varParams
         frame.returnAddress = returnAddress
@@ -1028,13 +1040,13 @@ public final class Machine: @unchecked Sendable {
             // reference the FORALL index variable in the child's frame.
             let child = spawnChild(of: process, scope: op.bodyScope,
                                    routine: process.frame.routine, op: op.bodyStart,
-                                   homeProcessor: nil, ports: [])
+                                   homeProcessor: nil)
             setSlot(child, op.indexSlot, .integer(groupFirst))
             if let processorExpression = op.processor {
                 let requested = try evaluate(processorExpression, child).asInteger ?? child.processor
                 child.processor = try validatedProcessor(requested)
             }
-            child.ports = try resolvePorts(op.ports, child)
+            try validatePorts(op.ports, child)
             // Those expressions ran outside any statement of the child; don't let the
             // child's first statement replay their results.
             endStatement(child, 0)
@@ -1066,28 +1078,26 @@ public final class Machine: @unchecked Sendable {
             try validatedProcessor(try evaluate($0, process).asInteger ?? process.processor)
         }
         let child = spawnChild(of: process, scope: op.bodyScope, routine: process.frame.routine,
-                               op: op.bodyStart, homeProcessor: requested, ports: [])
-        child.ports = try resolvePorts(op.ports, child)
+                               op: op.bodyStart, homeProcessor: requested)
+        try validatePorts(op.ports, child)
         endStatement(child, 0)
         process.children.append(child.id)
     }
 
-    private func resolvePorts(_ ports: [Expression], _ process: Process) throws -> [MemoryRef] {
-        var refs: [MemoryRef] = []
+    private func validatePorts(_ ports: [Expression], _ process: Process) throws {
+        var channelCount = 0
         for port in ports {
             let ref = try address(of: port, process)
-            guard case .channel(let buffer) = try rawLoad(ref: ref, process: process) else { continue }
-            buffer.receiverProcess = process.id
-            buffer.receiverPortIndex = refs.count
-            refs.append(ref)
+            if case .channel = try rawLoad(ref: ref, process: process) {
+                channelCount += 1
+            }
         }
-        if !refs.isEmpty { charge(timing.portSetup) }
-        return refs
+        if channelCount > 0 { charge(timing.portSetup) }
     }
 
     /// A child copies the parent's current locals, per the manual.
     private func spawnChild(of parent: Process, scope: Scope, routine: Int, op: Int,
-                            homeProcessor: Int?, ports: [MemoryRef]) -> Process {
+                            homeProcessor: Int?) -> Process {
         // The child's only frame is a copy of the parent's innermost one, so references to
         // that frame are rebased to frame 0. References into the parent's callers keep
         // pointing at the parent's frames, so `var` parameters still reach the caller.
@@ -1110,8 +1120,6 @@ public final class Machine: @unchecked Sendable {
             ?? chooseProcessor()
         let child = Process(id: id, frame: frame, processor: processor,
                             slice: timing.contextSwitchLimit)
-        child.createdAt = time
-        child.ports = ports
         processes.append(child)
         runQueue.append(child.id)
         return child
@@ -1192,13 +1200,25 @@ public final class Machine: @unchecked Sendable {
         process.blockReason = nil
         process.waitingOn = nil
         process.frames.removeAll()
-        // Anyone waiting on this process, or on a channel it can still feed, retries.
+        // JOIN waits for one child; FORALL and implicit process completion wait
+        // for all relevant children. Avoid waking the latter on every intermediate
+        // child termination only to block them again.
         for other in processes where !other.terminated && other.state == .blocked {
             switch other.blockReason {
-            case .join, .forall, .waitingForChildren:
+            case .join:
                 makeRunnable(other)
+            case .forall:
+                if let pending = other.waitingForForallChildren {
+                    let remaining = pending.filter { !processes[$0].terminated }.count
+                    other.blockReason = .forall(remaining: remaining)
+                    if remaining == 0 { makeRunnable(other) }
+                }
+            case .waitingForChildren:
+                let remaining = liveChildren(of: other)
+                other.blockReason = .waitingForChildren(remaining: remaining)
+                if remaining == 0 { makeRunnable(other) }
             case .channelRead:
-                if let buffer = other.waitingOn, !buffer.queue.isEmpty { makeRunnable(other) }
+                if let buffer = other.waitingOn, !buffer.isEmpty { makeRunnable(other) }
             default:
                 break
             }
@@ -1344,7 +1364,15 @@ public final class Machine: @unchecked Sendable {
         switch type {
         case .array(let element, let lower, let upper):
             let count = zip(lower, upper).reduce(1) { $0 * max(0, $1.1 - $1.0 + 1) }
-            return Array(repeating: defaultWords(for: element), count: count).flatMap { $0 }.map { $0 }
+            // Rebuild each element independently. ChannelBuffer is a reference type;
+            // repeating one defaultWords array would make every channel element share
+            // the same FIFO buffer.
+            var words: [Value?] = []
+            words.reserveCapacity(count * max(1, element.footprint))
+            for _ in 0..<count {
+                words.append(contentsOf: defaultWords(for: element))
+            }
+            return words
         case .record(let fields):
             return fields.flatMap { defaultWords(for: $0.type) }
         default:

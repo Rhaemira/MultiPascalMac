@@ -14,11 +14,6 @@ public indirect enum TypeInfo: Sendable, Equatable {
     case array(element: TypeInfo, lower: [Int], upper: [Int])
     case record([RecordField])
 
-    public var isChannel: Bool {
-        if case .channelOf = self { return true }
-        return false
-    }
-
     public var isNumeric: Bool {
         self == .integer || self == .real
     }
@@ -76,12 +71,6 @@ public indirect enum TypeInfo: Sendable, Equatable {
     }
 
     // MARK: Layout
-
-    /// The type reached by indexing an array-typed value with the given subscripts.
-    public var elementType: TypeInfo {
-        if case .array(let element, _, _) = self { return element }
-        return .integer
-    }
 
     /// The type of one array dimension, i.e. the array type obtained by dropping
     /// the outermost subscript of a multidimensional array.
@@ -165,13 +154,29 @@ public struct RecordField: Sendable, Equatable {
 /// Channel buffers and pointer cells are reference-typed. The simulator is single-threaded
 /// by construction (one global virtual clock), so unchecked conformance is sound here.
 public final class ChannelBuffer: @unchecked Sendable {
-    public var queue: [Value] = []
-    /// Receiver process/port binding recorded by the `Port` statement.
-    public var receiverProcess: Int?
-    public var receiverPortIndex: Int?
-    /// Number of packets the manual's `Channel` support allows in flight.
-    public var capacity: Int = 1
+    private var values: [Value] = []
+    private var head = 0
+
     public init() {}
+
+    var isEmpty: Bool { head >= values.count }
+
+    func enqueue(_ value: Value) {
+        values.append(value)
+    }
+
+    /// Amortized O(1) FIFO removal. Compact only after a substantial prefix
+    /// has been consumed, avoiding Array.removeFirst() for every channel read.
+    func dequeue() -> Value? {
+        guard !isEmpty else { return nil }
+        let value = values[head]
+        head += 1
+        if head >= 64 && head * 2 >= values.count {
+            values.removeFirst(head)
+            head = 0
+        }
+        return value
+    }
 }
 
 public final class CellBox: @unchecked Sendable, Hashable {

@@ -117,7 +117,6 @@ public struct Loader {
             globalScope: globalScope,
             globalFootprint: nextAddress,
             globalSegment: globalSegment,
-            sourceLines: unit.sourceLines,
             executableLines: executableLines
         )
     }
@@ -282,7 +281,6 @@ public struct Loader {
     private mutating func compileRoutine(_ routine: RoutineDecl, parent: Scope) throws -> CompiledRoutine {
         var table: [String: Binding] = [:]
         var slot = 0
-        var valueParams = 0
         var varParams = 0
         var resultSlot: Int?
         var resultType: TypeInfo = .integer
@@ -290,6 +288,10 @@ public struct Loader {
 
         for param in routine.params {
             let type = try resolve(param.type)
+            guard !param.isChannel || param.isVar else {
+                throw MPWinError.semantic(Diagnostic(.error,
+                    "Channel parameters must be declared with VAR.", routine.location))
+            }
             let binding: Binding
             if param.isVar {
                 binding = .varParam(varParams, type)
@@ -297,7 +299,6 @@ public struct Loader {
             } else {
                 binding = .localSlot(slot, type)
                 slot += max(1, type.footprint)
-                valueParams += 1
             }
             table[param.name.lowercased()] = binding
             parameters.append(RoutineParameter(name: param.name, binding: binding))
@@ -338,7 +339,6 @@ public struct Loader {
             lines: compiler.lines,
             scope: scope,
             localCount: compiler.slotCount,
-            paramCount: valueParams,
             parameters: parameters,
             resultSlot: resultSlot,
             location: routine.location
@@ -357,7 +357,6 @@ public struct Loader {
             lines: compiler.lines,
             scope: globalScope,
             localCount: compiler.slotCount,
-            paramCount: 0,
             parameters: [],
             resultSlot: nil,
             location: .unknown

@@ -4,11 +4,8 @@ import Foundation
 public struct Parser {
     private var tokens: [Token]
     private var position: Int = 0
-    private var lineCount: Int
-
     public init(source: String) throws {
         self.tokens = try Lexer.tokenize(source)
-        self.lineCount = tokens.last.map { $0.location.line } ?? 0
     }
 
     // MARK: - Token helpers
@@ -183,9 +180,7 @@ public struct Parser {
             types: types,
             globals: globals,
             routines: routines,
-            body: body,
-            mainRoutineIndex: nil,
-            sourceLines: max(lineCount, 1)
+            body: body
         )
     }
 
@@ -316,9 +311,8 @@ public struct Parser {
         try expect(.end)
         // Both procedure and function declarations require a trailing semicolon.
         try expect(.semicolon)
-        if returnType != nil { /* retained in `RoutineDecl.resultType` */ }
         return RoutineDecl(name: name, isFunction: isFunction, params: params, locals: locals,
-                           body: body, resultType: returnType, location: location, isNested: false)
+                           body: body, resultType: returnType, location: location)
     }
 
     // MARK: - Types
@@ -995,7 +989,6 @@ extension Parser {
     private init(tokens: [Token], start: Int) {
         self.tokens = tokens
         self.position = start
-        self.lineCount = tokens.last?.location.line ?? 0
     }
 
     private mutating func parseIndexList() throws -> [Expression] {

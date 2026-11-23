@@ -45,7 +45,7 @@ struct CLI {
                     index += 1
                 case "--policy":
                     guard index + 1 < arguments.count, let policy = parsePolicy(arguments[index + 1]) else {
-                        return usageError("--policy expects round-robin, random, or shortest-job-first")
+                        return usageError("--policy expects round-robin or random")
                     }
                     options.policy = policy
                     index += 2
@@ -74,7 +74,7 @@ struct CLI {
             print(machine.metrics.report(processorsUsed: Set(machine.status.map(\.processor)).count))
 
             switch outcome {
-            case .completed:
+            case .completed, .stepCompleted:
                 return 0
             case .breakpoint(let line):
                 writeError("Breakpoint hit at line \(line).\n")
@@ -105,7 +105,6 @@ struct CLI {
         switch value.lowercased() {
         case "round-robin", "roundrobin", "rr": return .roundRobin
         case "random": return .random
-        case "shortest-job-first", "shortest", "sjf": return .shortestJobFirst
         default: return nil
         }
     }
@@ -126,7 +125,7 @@ struct CLI {
         Options:
           --input <file|->       Load READ/READLN input; use - for stdin.
           --time-limit <n>       Stop when simulated time reaches n.
-          --policy <policy>      round-robin, random, or shortest-job-first.
+          --policy <policy>      round-robin or random.
           --seed <n>             Set deterministic scheduler/variation seed.
           --free                 Disable simulated timing costs.
           -h, --help             Show this help.

@@ -110,7 +110,6 @@ public final class CompiledRoutine: @unchecked Sendable {
     public let lines: [Int]
     public let scope: Scope
     public let localCount: Int
-    public let paramCount: Int
     /// Parameters in declaration order.
     public let parameters: [RoutineParameter]
     /// Slot holding the function result, when this routine is a function.
@@ -118,7 +117,7 @@ public final class CompiledRoutine: @unchecked Sendable {
     public let location: SourceLocation
 
     init(name: String, isFunction: Bool, resultType: TypeInfo, code: [Op], lines: [Int],
-         scope: Scope, localCount: Int, paramCount: Int, parameters: [RoutineParameter],
+         scope: Scope, localCount: Int, parameters: [RoutineParameter],
          resultSlot: Int?, location: SourceLocation) {
         self.name = name
         self.isFunction = isFunction
@@ -127,7 +126,6 @@ public final class CompiledRoutine: @unchecked Sendable {
         self.lines = lines
         self.scope = scope
         self.localCount = localCount
-        self.paramCount = paramCount
         self.parameters = parameters
         self.resultSlot = resultSlot
         self.location = location
@@ -145,7 +143,6 @@ public final class CompiledProgram: @unchecked Sendable {
     public let globalFootprint: Int
     /// Home segment per global address, used for data partitioning in multicomputer runs.
     public let globalSegment: [Segment]
-    public let sourceLines: Int
     /// Opcode indices per source line, for "executable line" breakpoint validation.
     public let executableLines: Set<Int>
 
@@ -161,7 +158,7 @@ public final class CompiledProgram: @unchecked Sendable {
 
     init(name: String, architecture: ArchitectureSpec, routines: [CompiledRoutine],
          mainRoutine: Int, globalScope: Scope, globalFootprint: Int,
-         globalSegment: [Segment], sourceLines: Int, executableLines: Set<Int>) {
+         globalSegment: [Segment], executableLines: Set<Int>) {
         self.name = name
         self.architecture = architecture
         self.routines = routines
@@ -169,7 +166,6 @@ public final class CompiledProgram: @unchecked Sendable {
         self.globalScope = globalScope
         self.globalFootprint = globalFootprint
         self.globalSegment = globalSegment
-        self.sourceLines = sourceLines
         self.executableLines = executableLines
     }
 

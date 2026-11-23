@@ -22,67 +22,17 @@ struct ContentView: View {
         VStack(spacing: 0) {
             appHeader
             Divider()
-            if shouldShowQuickStart {
-                quickStartBanner
-                Divider()
-            }
             mainWorkspace
             Divider()
             statusBar
         }
-        .animation(.easeInOut(duration: 0.16), value: shouldShowQuickStart)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $model.showingParameters) {
-            ParametersView(model: model)
-        }
-        .sheet(isPresented: $model.showingInput) {
-            InputView(model: model)
-        }
-        .sheet(isPresented: $model.showingAbout) {
-            AboutView()
-        }
-    }
-
-    private var shouldShowQuickStart: Bool {
-        model.lastOutcome == nil && model.output.isEmpty && model.diagnostics.isEmpty
-    }
-
-    /// A lightweight onboarding strip that disappears when the user gets a result
-    /// or a compiler diagnostic. It gives first-time users an obvious next action.
-    private var quickStartBanner: some View {
-        HStack(spacing: 10) {
-            Label("Quick start", systemImage: "sparkles")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(MPTheme.blue)
-            Rectangle().fill(MPTheme.border).frame(width: 1, height: 18)
-            quickStep("1", "Edit source")
-            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-            quickStep("2", "Compile · ⌘F9")
-            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-            quickStep("3", "Run · F9")
-            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-            Text("Explore Output, Processes and Activity below")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(MPTheme.blue.opacity(0.055))
-    }
-
-    private func quickStep(_ number: String, _ title: String) -> some View {
-        HStack(spacing: 5) {
-            Text(number)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(MPTheme.blue)
-                .frame(width: 17, height: 17)
-                .background(MPTheme.blue.opacity(0.12), in: Circle())
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.primary)
-                .fixedSize()
+        .sheet(item: $model.activeSheet) { sheet in
+            switch sheet {
+            case .parameters: ParametersView(model: model)
+            case .input: InputView(model: model)
+            case .about: AboutView()
+            }
         }
     }
 
@@ -112,7 +62,6 @@ struct ContentView: View {
                 Spacer()
 
                 architecturePill
-                statusPill
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -131,84 +80,55 @@ struct ContentView: View {
                 }
                 .disabled(model.isRunning)
 
+                actionButton("Step", systemImage: "arrow.right.to.line", tint: MPTheme.orange,
+                             shortcut: KeyEquivalent("\u{F70A}"), modifiers: []) {
+                    model.step()
+                }
+                .disabled(model.isRunning || model.lastOutcome?.isFailure == true || model.lastOutcome == .completed)
+
                 actionButton("Stop", systemImage: "stop.fill", tint: MPTheme.red) {
                     model.stop()
                 }
                 .disabled(!model.isRunning)
 
-                actionButton("Continue", systemImage: "forward.fill", tint: MPTheme.purple) {
-                    model.continueRun()
-                }
-                .disabled(model.isRunning || model.machine == nil)
-
-                actionButton("Step", systemImage: "arrow.right.to.line", tint: MPTheme.orange,
-                             shortcut: KeyEquivalent("\u{F70A}"), modifiers: []) {
-                    model.step()
-                }
-                .disabled(model.isRunning)
-
-                actionButton("Reset", systemImage: "arrow.counterclockwise", tint: .secondary) {
-                    model.reset()
-                }
-                .disabled(model.isRunning)
-
                 Spacer(minLength: 10)
 
                 Menu {
-                    Button("New Document", systemImage: "doc.badge.plus") { model.newFile() }
-                    Button("Open…", systemImage: "folder") { model.openSource() }
-                    Divider()
-                    Button("Save", systemImage: "square.and.arrow.down") { model.saveSource() }
-                    Button("Save As…", systemImage: "square.and.arrow.down.on.square") { model.saveSourceAs() }
-                } label: {
-                    Label("File", systemImage: "doc")
-                }
-                .menuStyle(.borderlessButton)
-                .buttonStyle(.bordered)
-
-                Menu {
-                    ForEach(MPWinAppModel.samples) { sample in
-                        Button {
-                            model.openSample(sample)
-                        } label: {
-                            Label {
-                                Text(sample.name)
-                            } icon: {
-                                Image(systemName: sample.systemImage)
+                    Section("Debug") {
+                        Button("Continue", systemImage: "forward.fill") { model.continueRun() }
+                            .disabled(model.isRunning || model.machine == nil || model.lastOutcome?.isFailure == true || model.lastOutcome == .completed)
+                        Button("Reset", systemImage: "arrow.counterclockwise") { model.reset() }
+                            .disabled(model.isRunning)
+                    }
+                    Section("Document") {
+                        Button("New Document", systemImage: "doc.badge.plus") { model.newFile() }
+                        Button("Open…", systemImage: "folder") { model.openSource() }
+                        Button("Save", systemImage: "square.and.arrow.down") { model.saveSource() }
+                        Button("Save As…", systemImage: "square.and.arrow.down.on.square") { model.saveSourceAs() }
+                    }
+                    Section("Samples") {
+                        ForEach(MPWinAppModel.samples) { sample in
+                            Button {
+                                model.openSample(sample)
+                            } label: {
+                                Label(sample.name, systemImage: sample.systemImage)
                             }
                         }
                     }
+                    Section("Application") {
+                        Button("Simulation Parameters", systemImage: "slider.horizontal.3") {
+                            model.activeSheet = .parameters
+                        }
+                        .disabled(model.isRunning)
+                        Button("About Multi-Pascal", systemImage: "info.circle") {
+                            model.activeSheet = .about
+                        }
+                    }
                 } label: {
-                    Label("Samples", systemImage: "sparkles")
+                    Label("More", systemImage: "ellipsis.circle")
                 }
                 .menuStyle(.borderlessButton)
                 .buttonStyle(.bordered)
-
-                Button {
-                    model.openInputSheet()
-                } label: {
-                    Label("Input", systemImage: "keyboard")
-                }
-                .buttonStyle(.bordered)
-                .tint(MPTheme.purple)
-                .help(model.inputSourceName == nil ? "Enter or load program input" : "Edit current input")
-
-                Button {
-                    model.showingParameters = true
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .help("Simulation parameters")
-
-                Button {
-                    model.showingAbout = true
-                } label: {
-                    Image(systemName: "info.circle")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.borderless)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
@@ -228,20 +148,6 @@ struct ContentView: View {
         .padding(.vertical, 6)
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().stroke(MPTheme.border))
-    }
-
-    private var statusPill: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(model.isRunning ? MPTheme.orange : (model.lastOutcome?.isFailure == true ? MPTheme.red : MPTheme.mint))
-                .frame(width: 7, height: 7)
-            Text(model.statusMessage)
-                .lineLimit(1)
-        }
-        .font(.caption.weight(.medium))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background((model.isRunning ? MPTheme.orange : (model.lastOutcome?.isFailure == true ? MPTheme.red : MPTheme.mint)).opacity(0.12), in: Capsule())
     }
 
     private func actionButton(_ title: String, systemImage: String, tint: Color,
@@ -270,9 +176,7 @@ struct ContentView: View {
         case "Compile": return "Check the source and build the simulator's executable representation (⌘F9)."
         case "Run": return "Run the program from the beginning (F9)."
         case "Stop": return "Request that the current simulation stop (Esc)."
-        case "Continue": return "Continue the paused simulation, or restart after cancellation."
         case "Step": return "Execute one simulation step (F7)."
-        case "Reset": return "Clear execution state and return to the Output view."
         default: return title
         }
     }
@@ -281,14 +185,14 @@ struct ContentView: View {
         VSplitView {
             HSplitView {
                 sourcePane
-                    .frame(minWidth: 620, idealWidth: 820)
+                    .frame(minWidth: 520, idealWidth: 760)
                 inspectorPane
-                    .frame(minWidth: 270, idealWidth: 310, maxWidth: 360)
+                    .frame(minWidth: 230, idealWidth: 270, maxWidth: 320)
             }
-            .frame(minHeight: 430)
+            .frame(minHeight: 320)
 
             resultsPane
-                .frame(minHeight: 250)
+                .frame(minHeight: 160)
         }
     }
 
@@ -326,13 +230,6 @@ struct ContentView: View {
     private var inspectorPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                inspectorCard(title: "Program", icon: "doc.text", tint: MPTheme.blue) {
-                    InspectorRow(title: "Document", value: model.fileDisplayName)
-                    InspectorRow(title: "Status", value: model.statusMessage)
-                    InspectorRow(title: "Architecture", value: model.architectureText)
-                    InspectorRow(title: "Executable lines", value: "\(model.executableLineCount)")
-                }
-
                 inspectorCard(title: "Input", icon: "keyboard", tint: MPTheme.purple) {
                     HStack(spacing: 10) {
                         Image(systemName: model.inputSourceName == nil ? "circle.dashed" : "checkmark.circle.fill")
@@ -355,6 +252,10 @@ struct ContentView: View {
                 }
 
                 inspectorCard(title: "Breakpoints", icon: "circle.fill", tint: MPTheme.orange) {
+                    Text("\(model.executableLineCount) executable lines")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     HStack(spacing: 7) {
                         TextField("Line", text: $model.breakpointText)
                             .textFieldStyle(.roundedBorder)
@@ -451,7 +352,7 @@ struct ContentView: View {
             ZStack {
                 switch model.selectedTab {
                 case .output:
-                    OutputView(text: model.output, onCompile: { _ = model.compile() }, onRun: { model.run() })
+                    OutputView(text: model.output)
                 case .processes:
                     ProcessTableView(processes: model.processes)
                 case .metrics:
@@ -500,12 +401,6 @@ struct ContentView: View {
 
             Spacer()
 
-            if model.inputSourceName != nil {
-                Label(model.inputSourceName!, systemImage: "keyboard")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
             Text("MPWin dialect · virtual processor timing · F7 Step · Esc Stop")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -534,8 +429,6 @@ struct InspectorRow: View {
 
 struct OutputView: View {
     let text: String
-    let onCompile: () -> Void
-    let onRun: () -> Void
 
     var body: some View {
         Group {
@@ -554,20 +447,7 @@ struct OutputView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 450)
-                    HStack(spacing: 10) {
-                        Button(action: onCompile) {
-                            Label("Compile", systemImage: "hammer.fill")
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(MPTheme.blue)
-                        Button(action: onRun) {
-                            Label("Run program", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(MPTheme.mint)
-                    }
-                    .padding(.top, 3)
-                    Spacer(minLength: 24)
+remove duplicated primary actions from empty state                    Spacer(minLength: 24)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
@@ -643,7 +523,6 @@ struct StateBadge: View {
         switch state {
         case .ready: return MPTheme.blue
         case .running: return MPTheme.mint
-        case .preempted: return MPTheme.orange
         case .blocked: return MPTheme.purple
         case .terminated: return .secondary
         }
@@ -1091,7 +970,6 @@ struct ParametersView: View {
 
                     ParameterSection(title: "Profiling", systemImage: "waveform.path", tint: MPTheme.red) {
                         ParameterStepperRow(title: "Profile sample step", value: $timing.profileSampleStep, range: 1...10_000)
-                        ParameterStepperRow(title: "Activity sample step", value: $timing.activitySampleStep, range: 1...10_000)
                     }
                 }
                 .padding(20)
@@ -1374,11 +1252,11 @@ struct MultiPascalCommands: Commands {
         }
 
         CommandMenu("Settings") {
-            Button("Simulation Parameters") { model.showingParameters = true }
+            Button("Simulation Parameters") { model.activeSheet = .parameters }
         }
 
         CommandGroup(replacing: .help) {
-            Button("Multi-Pascal Mac Help") { model.showingAbout = true }
+            Button("Multi-Pascal Mac Help") { model.activeSheet = .about }
         }
     }
 }

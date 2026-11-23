@@ -9,6 +9,14 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class MPWinAppModel: ObservableObject {
+    enum ActiveSheet: String, Identifiable {
+        case parameters
+        case input
+        case about
+
+        var id: String { rawValue }
+    }
+
     enum ResultsTab: String, CaseIterable, Identifiable {
         case output = "Output"
         case processes = "Processes"
@@ -211,6 +219,7 @@ final class MPWinAppModel: ObservableObject {
     @Published private(set) var fileURL: URL?
     @Published private(set) var documentName = "Untitled"
     @Published private(set) var compiledProgram: CompiledProgram?
+    private var compiledSource: String?
     @Published private(set) var machine: Machine?
     @Published private(set) var output = ""
     @Published private(set) var diagnostics = ""
@@ -227,9 +236,7 @@ final class MPWinAppModel: ObservableObject {
     @Published var selectedTab: ResultsTab = .output
     @Published var breakpointText = ""
     @Published var breakpoints: Set<Int> = []
-    @Published var showingParameters = false
-    @Published var showingAbout = false
-    @Published var showingInput = false
+    @Published var activeSheet: ActiveSheet?
     @Published var inputText = ""
     @Published private(set) var inputSourceName: String?
     @Published var options = ProgramOptions()
@@ -260,7 +267,6 @@ final class MPWinAppModel: ObservableObject {
         return Set(processes.map(\.processor)).count
     }
 
-    var hasCompiledProgram: Bool { compiledProgram != nil && !isDirty }
 
     // MARK: Compilation / execution
 
@@ -272,14 +278,15 @@ final class MPWinAppModel: ObservableObject {
             let unit = try parser.parseProgram()
             let program = try Loader.load(unit)
             compiledProgram = program
+            compiledSource = source
             breakpoints = Set(breakpoints.filter { program.executableLines.contains($0) })
             diagnostics = ""
             statusMessage = "Compiled · \(program.executableLines.count) executable lines"
-            isDirty = false
             selectedTab = .output
             return true
         } catch {
             compiledProgram = nil
+            compiledSource = nil
             diagnostics = format(error: error)
             statusMessage = "Compilation failed"
             selectedTab = .diagnostics
@@ -289,14 +296,14 @@ final class MPWinAppModel: ObservableObject {
 
     func run() {
         guard !isRunning else { return }
-        if compiledProgram == nil || isDirty {
+        if compiledProgram == nil || compiledSource != source {
             guard compile() else { return }
         }
         guard let program = compiledProgram else { return }
         if program.requiresInput && options.input == nil {
             inputText = ""
             inputSourceName = nil
-            showingInput = true
+            activeSheet = .input
             statusMessage = "Waiting for input"
             selectedTab = .output
             return
@@ -305,15 +312,19 @@ final class MPWinAppModel: ObservableObject {
     }
 
     func runWithInput() {
-        guard !isRunning, compiledProgram != nil else { return }
+        guard !isRunning else { return }
+        if compiledProgram == nil || compiledSource != source {
+            guard compile() else { return }
+        }
+        guard let program = compiledProgram else { return }
         options.input = inputText
         inputSourceName = "Console input"
-        showingInput = false
-        startBackgroundRun(program: compiledProgram!, machine: nil)
+        activeSheet = nil
+        startBackgroundRun(program: program, machine: nil)
     }
 
     func continueRun() {
-        guard !isRunning else { return }
+        guard !isRunning, lastOutcome?.isFailure != true, lastOutcome != .completed else { return }
         if case .cancelled? = lastOutcome {
             run()
             return
@@ -327,13 +338,21 @@ final class MPWinAppModel: ObservableObject {
 
     func step() {
         guard !isRunning else { return }
-        if compiledProgram == nil || isDirty {
+        if compiledProgram == nil || compiledSource != source {
             guard compile() else { return }
         }
         guard let program = compiledProgram else { return }
+        if program.requiresInput && options.input == nil {
+            inputText = ""
+            inputSourceName = nil
+            activeSheet = .input
+            statusMessage = "Waiting for input"
+            selectedTab = .output
+            return
+        }
         // A stopped machine's token stays cancelled, so stepping it again would only
         // report "Stopped". Start over instead, as Continue does.
-        if case .cancelled? = lastOutcome { machine = nil }
+        if case .cancelled? = lastOutcome { reset() }
         let current: Machine
         if let machine {
             current = machine
@@ -417,6 +436,7 @@ final class MPWinAppModel: ObservableObject {
         documentName = "Untitled"
         clearInput()
         compiledProgram = nil
+        compiledSource = nil
         reset()
         statusMessage = "New document"
     }
@@ -430,6 +450,7 @@ final class MPWinAppModel: ObservableObject {
         fileURL = nil
         documentName = sample.name
         compiledProgram = nil
+        compiledSource = nil
         inputSourceName = nil
         inputText = sample.input ?? ""
         options.input = sample.input
@@ -455,6 +476,7 @@ final class MPWinAppModel: ObservableObject {
             isDirty = false
             fileURL = url
             documentName = url.lastPathComponent
+            compiledSource = nil
             reset()
             statusMessage = "Opened · \(url.lastPathComponent)"
         } catch {
@@ -484,7 +506,7 @@ final class MPWinAppModel: ObservableObject {
 
     func openInputSheet() {
         if inputText.isEmpty, let value = options.input { inputText = value }
-        showingInput = true
+        activeSheet = .input
     }
 
     func loadInputFile() {
@@ -520,12 +542,13 @@ final class MPWinAppModel: ObservableObject {
         cancellationToken?.cancel()
         cancellationToken = nil
         options.timing = timing
-        machine = nil
+        reset()
         statusMessage = "Parameters applied"
     }
 
     func applySimulationSettings(timeLimitText: String, policy: SchedulingPolicy, seedText: String,
                                  timing: TimingModel) {
+        guard !isRunning else { return }
         let trimmed = timeLimitText.trimmingCharacters(in: .whitespacesAndNewlines)
         options.timeLimit = Int(trimmed).flatMap { $0 > 0 ? $0 : nil }
         options.policy = policy
@@ -536,8 +559,9 @@ final class MPWinAppModel: ObservableObject {
     }
 
     func resetParametersToDefaults() {
+        guard !isRunning else { return }
         options = ProgramOptions()
-        machine = nil
+        reset()
         statusMessage = "Parameters reset to defaults"
     }
 
@@ -579,6 +603,16 @@ final class MPWinAppModel: ObservableObject {
             statusMessage = existingMachine == nil ? "Running…" : "Continuing…"
             selectedTab = .output
             diagnostics = ""
+            if existingMachine == nil {
+                output = ""
+                metrics = Metrics()
+                processes = []
+                processorLoad = []
+                profile = []
+                processorActivity = []
+                activityTraceTruncated = false
+                lastOutcome = nil
+            }
         case .step:
             statusMessage = "Stepping…"
         }
@@ -614,7 +648,7 @@ final class MPWinAppModel: ObservableObject {
             switch snapshot.outcome {
             case .deadlock:
                 selectedTab = .processes
-            case .runtimeError, .timeLimitExceeded:
+            case .runtimeError, .timeLimitExceeded, .stepLimitReached:
                 selectedTab = .diagnostics
             default:
                 break
@@ -688,9 +722,10 @@ final class MPWinAppModel: ObservableObject {
         switch outcome {
         case .completed: return "Completed"
         case .breakpoint(let line): return "Breakpoint · line \(line)"
+        case .stepCompleted: return "Step complete"
+        case .stepLimitReached: return "Stopped · safety step limit reached"
         case .timeLimitExceeded: return "Stopped · time alarm exceeded"
         case .deadlock: return "Stopped · deadlock detected"
-        case .stepLimitReached: return "Step complete"
         case .cancelled: return "Stopped"
         case .runtimeError: return "Runtime error"
         }
@@ -705,6 +740,8 @@ private extension RunOutcome {
             return "All currently live processes are blocked. Open Processes to inspect their wait states."
         case .timeLimitExceeded:
             return "The configured time alarm was reached before the program completed."
+        case .stepLimitReached:
+            return "The simulator reached its safety limit on scheduler iterations before the program completed."
         default:
             return ""
         }

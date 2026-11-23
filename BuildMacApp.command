@@ -11,7 +11,6 @@ ICON_SOURCE="Sources/MultiPascalMac/Resources/AppIcon.png"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MultiPascalMac"
-cp "$ICON_SOURCE" "$APP/Contents/Resources/AppIconPreview.png"
 
 # Build the complete macOS .icns family from the 1024px master image.
 ICONSET="$(mktemp -d)/AppIcon.iconset"

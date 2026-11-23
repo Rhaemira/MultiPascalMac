@@ -16,8 +16,7 @@ let package = Package(
         .executableTarget(
             name: "MultiPascalMac",
             dependencies: ["MPWinCore"],
-            exclude: ["Info.plist"],
-            resources: [.process("Resources")],
+            exclude: ["Info.plist", "Resources"],
             linkerSettings: [
                 // Embeds Info.plist directly into the binary's __TEXT,__info_plist
                 // section. Without this, running the raw executable (which is what
