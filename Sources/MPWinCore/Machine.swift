@@ -1023,49 +1023,55 @@ public final class Machine: @unchecked Sendable {
                 SourceLocation(line: 0, column: 0)))
         }
 
-        var childIDs: [Int] = []
-        childIDs.reserveCapacity(childCount)
+        var createdChildren: [Process] = []
+        createdChildren.reserveCapacity(childCount)
         var groupFirst = first
-        while true {
-            // Subtract first, then add at most the remaining distance. This avoids
-            // overflowing when a legal index range approaches Int.max.
-            let remaining = last - groupFirst
-            let span = min(groupSize - 1, remaining)
-            let (candidateLast, addOverflow) = groupFirst.addingReportingOverflow(span)
-            guard !addOverflow else {
-                throw MPWinError.runtime(Diagnostic(.error,
-                    "FORALL range is too large to represent safely.",
-                    SourceLocation(line: 0, column: 0)))
+        do {
+            while true {
+                // Subtract first, then add at most the remaining distance. This avoids
+                // overflowing when a legal index range approaches Int.max.
+                let remaining = last - groupFirst
+                let span = min(groupSize - 1, remaining)
+                let (candidateLast, addOverflow) = groupFirst.addingReportingOverflow(span)
+                guard !addOverflow else {
+                    throw MPWinError.runtime(Diagnostic(.error,
+                        "FORALL range is too large to represent safely.",
+                        SourceLocation(line: 0, column: 0)))
+                }
+                let groupLast = candidateLast
+                // The child must exist before evaluating @/Port expressions so they can
+                // reference the FORALL index variable in the child's frame.
+                let child = spawnChild(of: process, scope: op.bodyScope,
+                                       routine: process.frame.routine, op: op.bodyStart,
+                                       homeProcessor: nil)
+                createdChildren.append(child)
+                setSlot(child, op.indexSlot, .integer(groupFirst))
+                if let processorExpression = op.processor {
+                    let requested = try evaluate(processorExpression, child).asInteger ?? child.processor
+                    child.processor = try validatedProcessor(requested)
+                }
+                try validatePorts(op.ports, child)
+                // Those expressions ran outside any statement of the child; don't let the
+                // child's first statement replay their results.
+                endStatement(child, 0)
+                if groupFirst < groupLast {
+                    child.forallContinuation = ForallContinuation(
+                        nextIndex: groupFirst + 1,
+                        lastIndex: groupLast,
+                        indexSlot: op.indexSlot,
+                        bodyStart: op.bodyStart
+                    )
+                }
+                if groupLast == last { break }
+                groupFirst = groupLast + 1
             }
-            let groupLast = candidateLast
-            // The child must exist before evaluating @/Port expressions so they can
-            // reference the FORALL index variable in the child's frame.
-            let child = spawnChild(of: process, scope: op.bodyScope,
-                                   routine: process.frame.routine, op: op.bodyStart,
-                                   homeProcessor: nil)
-            setSlot(child, op.indexSlot, .integer(groupFirst))
-            if let processorExpression = op.processor {
-                let requested = try evaluate(processorExpression, child).asInteger ?? child.processor
-                child.processor = try validatedProcessor(requested)
-            }
-            try validatePorts(op.ports, child)
-            // Those expressions ran outside any statement of the child; don't let the
-            // child's first statement replay their results.
-            endStatement(child, 0)
-            if groupFirst < groupLast {
-                child.forallContinuation = ForallContinuation(
-                    nextIndex: groupFirst + 1,
-                    lastIndex: groupLast,
-                    indexSlot: op.indexSlot,
-                    bodyStart: op.bodyStart
-                )
-            }
-            childIDs.append(child.id)
-            process.children.append(child.id)
-            if groupLast == last { break }
-            groupFirst = groupLast + 1
+        } catch {
+            for child in createdChildren { discardUnstartedChild(child) }
+            throw error
         }
 
+        let childIDs = createdChildren.map(\.id)
+        process.children.append(contentsOf: childIDs)
         process.waitingForForallChildren = childIDs
         throw Suspend.block(.forall(remaining: childIDs.count), readyAt: nil)
     }
