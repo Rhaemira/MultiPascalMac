@@ -481,9 +481,18 @@ public final class Machine: @unchecked Sendable {
         metrics.time = time
         for process in processes where !process.terminated {
             if let readyAt = process.readyAt, readyAt <= time {
-                makeRunnable(process)
+                wakeDuration(process)
             }
         }
+    }
+
+    private func wakeDuration(_ process: Process) {
+        if let parallelDeadline = process.pendingParallelWakeAt {
+            parallelElapsedFloor = max(parallelElapsedFloor, parallelDeadline)
+            process.pendingParallelWakeAt = nil
+            updateParallelTimeMetric()
+        }
+        makeRunnable(process)
     }
 
     private func finish() -> RunOutcome {
