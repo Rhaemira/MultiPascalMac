@@ -474,6 +474,11 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
     /// a packet taken by a statement that later blocks is recorded, so the retried statement
     /// gets the same packet instead of consuming another one.
     func readChannel(_ buffer: ChannelBuffer, ref: MemoryRef, process: Process) throws -> Value {
+        if let receiver = buffer.receiverProcessID, receiver != process.id {
+            throw MPWinError.runtime(Diagnostic(.error,
+                "Channel is assigned for reception to process \(receiver).",
+                SourceLocation(line: 0, column: 0)))
+        }
         let frame = process.frames.count - 1
         let cursor = process.frames[frame].callCursor
         if cursor < process.frames[frame].callResults.count,
@@ -481,11 +486,10 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
             process.frames[frame].callCursor = process.frames[frame].callResults[cursor].next
             return value
         }
-        guard !buffer.queue.isEmpty else {
+        guard let value = buffer.dequeue() else {
             process.waitingOn = buffer
             throw Suspend.block(.channelRead(ref), readyAt: nil)
         }
-        let value = buffer.queue.removeFirst()
         chargeChannelOperation()
         let recorded = Frame.CallResult(value: value, next: cursor + 1)
         if cursor < process.frames[frame].callResults.count {
@@ -500,16 +504,18 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
     /// Puts one packet on a channel and wakes a reader waiting for it.
     func sendChannel(_ buffer: ChannelBuffer, value: Value, ref: MemoryRef,
                      target: Expression) {
-        buffer.queue.append(value)
+        buffer.enqueue(value)
         chargeChannelOperation()
         wakeReaders(of: buffer)
         _ = ref
         _ = target
     }
 
-    private func wakeReaders(of buffer: ChannelBuffer) {
+    func wakeReaders(of buffer: ChannelBuffer) {
         for other in processes where other.state == .blocked && !other.terminated {
-            if case .channelRead = other.blockReason, other.waitingOn === buffer {
+            if case .channelRead = other.blockReason,
+               other.waitingOn === buffer,
+               buffer.receiverProcessID == nil || buffer.receiverProcessID == other.id {
                 makeRunnable(other)
             }
         }
@@ -620,7 +626,7 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
                 throw MPWinError.runtime(Diagnostic(.error,
                     "Attempt to test a channel that is not initialised", location))
             }
-            return .boolean(!buffer.queue.isEmpty)
+            return .boolean(!buffer.isEmpty)
         }
         let value = try evaluate(inner, process)
         switch op {
@@ -686,13 +692,13 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
             // The scheduler only checks between statements, and this loop runs a whole
             // function inside one, so an endless loop here must check for itself.
             if isCancelled { throw Interrupt.cancelled }
-            if let limit = options.timeLimit, time >= limit { throw Interrupt.timeLimitExceeded }
             let frame = process.frames[process.frames.count - 1]
             let routine = program.routines[frame.routine]
             guard frame.op < routine.code.count else {
                 try leaveRoutine(process)
                 continue
             }
+            if let limit = options.timeLimit, time >= limit { throw Interrupt.timeLimitExceeded }
             let op = routine.code[frame.op]
             do {
                 let frameIndex = beginStatement(process)
@@ -702,7 +708,6 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
                 // The function's frames stay on the stack: on resume the process finishes
                 // the function, records its result in the caller's frame and retries the
                 // caller's statement, which then replays that result (see `evaluateCall`).
-                process.resumePending = false
                 throw suspend
             }
         }
@@ -738,7 +743,7 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
             // %MYID denotes the simulator process identifier.
             return .integer(process.id)
         case .clock:
-            return .real(Double(time))
+            return .real(Double(metrics.parallelTime))
         case .seqtime:
             return .integer(process.sequentialTime)
 

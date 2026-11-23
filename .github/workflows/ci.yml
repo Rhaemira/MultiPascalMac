@@ -69,3 +69,16 @@ jobs:
           ./PackageDMG.command
           plutil -lint "Multi-Pascal Mac.app/Contents/Info.plist"
           test -s "dist/Multi-Pascal-Mac-1.1-Amirali-Yazdani.dmg"
+
+      - name: Create updated source archive
+        run: |
+          zip -qr "$RUNNER_TEMP/MultiPascalMac-updated-source.zip" . \
+            -x '.git/*' '.build/*' 'dist/*' '*.dmg' 'Multi-Pascal Mac.app/*'
+
+      - name: Upload updated source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiPascalMac-updated-source
+          path: ${{ runner.temp }}/MultiPascalMac-updated-source.zip
+          if-no-files-found: error
+          retention-days: 14

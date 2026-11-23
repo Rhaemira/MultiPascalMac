@@ -32,7 +32,7 @@ public struct TimingModel: Sendable, Equatable {
     public var call: Int = 2
     /// Cost of transferring one parameter value.
     public var parameter: Int = 1
-    /// Cost of one word copied by an assignment, assignment, or `Read`/`Write`.
+    /// Cost of one word copied by an assignment or `Read`/`Write`.
     public var copy: Int = 1
     /// Fixed costs for the built-in statements.
     public var readStatement: Int = 5
@@ -42,8 +42,6 @@ public struct TimingModel: Sendable, Equatable {
     public var disposeStatement: Int = 2
     /// Profile sampling: minimum steps between profile samples (default 20).
     public var profileSampleStep: Int = 20
-    /// Minimum steps between process-activity samples (default 10).
-    public var activitySampleStep: Int = 10
 
     public init() {}
 
@@ -71,7 +69,6 @@ public struct TimingModel: Sendable, Equatable {
         model.newStatement = 0
         model.disposeStatement = 0
         model.profileSampleStep = Int.max
-        model.activitySampleStep = Int.max
         return model
     }()
 
@@ -95,17 +92,6 @@ public struct TimingModel: Sendable, Equatable {
         }
     }
 
-    /// Parallel-time cost charged to the running process for one statement.
-    public func parallelCost(of op: Op) -> Int {
-        switch op {
-        case .forall, .fork:
-            return processCreation
-        case .spawnEnd:
-            return 0
-        default:
-            return sequentialCost(of: op)
-        }
-    }
 }
 
 // MARK: - Scheduler policy
@@ -113,13 +99,11 @@ public struct TimingModel: Sendable, Equatable {
 public enum SchedulingPolicy: Sendable, CaseIterable, Hashable {
     case roundRobin
     case random
-    case shortestJobFirst
 
     public var displayName: String {
         switch self {
         case .roundRobin: return "Round-Robin"
         case .random: return "Random"
-        case .shortestJobFirst: return "Shortest-Job-First"
         }
     }
 }

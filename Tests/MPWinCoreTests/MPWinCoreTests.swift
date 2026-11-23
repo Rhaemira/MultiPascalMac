@@ -431,6 +431,28 @@ final class MPWinCoreTests: XCTestCase {
         XCTAssertEqual(machine.output, "1\n")
     }
 
+    func testDurationWakeupIsNotLostWhenAnotherProcessRunsPastItsDeadline() throws {
+        let program = try compile("""
+        program DurationWake;
+        var total, i: Integer;
+        begin
+          fork begin
+            duration(5);
+            writeln('awake');
+          end;
+          fork begin
+            for i := 1 to 30 do total := total + 1;
+          end;
+          join;
+        end.
+        """)
+        let machine = Machine(program: program)
+        machine.start()
+        XCTAssertEqual(machine.run(), .completed)
+        XCTAssertEqual(machine.output, "awake\n")
+        XCTAssertFalse(machine.metrics.deadlocked)
+    }
+
     func testDurationAndClock() throws {
         let machine = try run("""
         program Test;
@@ -455,6 +477,58 @@ final class MPWinCoreTests: XCTestCase {
         """)
         XCTAssertEqual(machine.output, "10 60\n")
         XCTAssertEqual(Set(machine.status.map(\.processor)), [0, 1, 2, 3])
+    }
+
+    func testPortAssignsReceiverAndReleasesOwnershipOnExit() throws {
+        let machine = try run("""
+        program PortReceiver;
+        var c: Channel of Integer;
+        begin
+          fork (Port c) begin
+            writeln(c);
+          end;
+          c := 42;
+          join;
+          c := 99;
+          writeln(c);
+        end.
+        """)
+        XCTAssertEqual(machine.output, "42\n99\n")
+    }
+
+    func testPortCanAssignEveryChannelInAnArray() throws {
+        let machine = try run("""
+        program PortArray;
+        var channels: array[0..1] of Channel of Integer;
+        begin
+          fork (Port channels) begin
+            writeln(channels[0]);
+            writeln(channels[1]);
+          end;
+          channels[0] := 11;
+          channels[1] := 22;
+          join;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "11\n22\n")
+    }
+
+    func testPortRejectsSecondLiveReceiverForSameChannel() throws {
+        let program = try compile("""
+        program DuplicatePort;
+        var c: Channel of Integer;
+        begin
+          fork (Port c) duration(10);
+          fork (Port c) writeln(c);
+        end.
+        """)
+        let machine = Machine(program: program, options: ProgramOptions(timing: .free))
+        machine.start()
+        let outcome = machine.run()
+        guard case .runtimeError(let message) = outcome else {
+            return XCTFail("Expected duplicate PORT receiver to fail, got \(outcome)")
+        }
+        XCTAssertTrue(message.contains("Channel already has receiver process"))
     }
 
     func testExplicitProcessorAndPortPrefix() throws {
@@ -1132,6 +1206,100 @@ final class MPWinCoreTests: XCTestCase {
         end.
         """)
         XCTAssertEqual(machine.output, "10 20 30\n")
+    }
+
+    func testLocalArrayOfChannelsHasIndependentBuffersAndIndexedReads() throws {
+        let machine = try run("""
+        program ChannelArray;
+        procedure Check;
+        var PipeValue: array[0..1] of Channel of Integer;
+            tokenValue, p: Integer;
+        begin
+          PipeValue[0] := 17;
+          PipeValue[1] := 29;
+          p := 2;
+          tokenValue := PipeValue[p - 1];
+          writeln(tokenValue);
+          tokenValue := PipeValue[0];
+          writeln(tokenValue);
+        end;
+        begin
+          Check;
+        end.
+        """)
+        XCTAssertEqual(machine.output, "29\n17\n")
+    }
+
+    func testChannelParametersMustBeVarParameters() throws {
+        XCTAssertThrowsError(try compile("""
+        program BadChannelParameter;
+        procedure Consume(c: Channel of Integer);
+        begin
+        end;
+        begin
+        end.
+        """)) { error in
+            XCTAssertTrue(String(describing: error).contains(
+                "Channel parameters must be declared with VAR."))
+        }
+    }
+
+    func testClockUsesParallelElapsedTimeRatherThanGlobalEventTime() throws {
+        let program = try compile("""
+        program ParallelClock;
+        Architecture Shared(4);
+        var values: array[1..3] of Integer;
+            i: Integer;
+        begin
+          forall i := 1 to 3 do values[i] := i;
+          writeln(clock);
+        end.
+        """)
+        let machine = Machine(program: program, options: ProgramOptions())
+        machine.start()
+        XCTAssertEqual(machine.run(), .completed)
+        let reportedClock = Double(machine.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .infinity
+        XCTAssertGreaterThan(reportedClock, 0)
+        XCTAssertLessThan(reportedClock, Double(machine.time),
+                          "CLOCK should report parallel elapsed time, not the event-loop sum of process costs")
+    }
+
+    func testStepYieldsAfterOneStatementInsideSeqoff() throws {
+        let program = try compile("""
+        program StepSequential;
+        var value: Integer;
+        begin
+          %SEQOFF;
+          value := 1;
+          value := 2;
+          %SEQON;
+        end.
+        """)
+        let machine = Machine(program: program, options: ProgramOptions(timing: .free))
+        machine.start()
+        XCTAssertEqual(machine.step(), .stepCompleted)
+        XCTAssertEqual(machine.step(), .stepCompleted)
+        XCTAssertEqual(machine.step(), .stepCompleted)
+        XCTAssertEqual(machine.step(), .stepCompleted)
+        XCTAssertEqual(machine.run(), .completed)
+    }
+
+    func testStepHasDistinctCompletionAndHonorsTimeAlarm() throws {
+        let program = try compile("""
+        program StepLimit;
+        var value: Integer;
+        begin
+          value := 1;
+          value := 2;
+        end.
+        """)
+        let stepper = Machine(program: program, options: ProgramOptions(timing: .free))
+        stepper.start()
+        XCTAssertEqual(stepper.step(), .stepCompleted)
+
+        let limited = Machine(program: program, options: ProgramOptions(timeLimit: 1))
+        limited.start()
+        XCTAssertEqual(limited.step(maxSteps: 2), .timeLimitExceeded)
     }
 
     func testProcedureLocalChannel() throws {

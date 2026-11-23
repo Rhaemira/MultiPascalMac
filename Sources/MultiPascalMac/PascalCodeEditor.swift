@@ -197,8 +197,7 @@ private final class PascalLineNumberRuler: NSRulerView {
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView,
-              let layoutManager = textView.layoutManager,
-              let textContainer = textView.textContainer else { return }
+              let layoutManager = textView.layoutManager else { return }
 
         let source = textView.string as NSString
         let lineHeight = max(1, textView.font?.boundingRectForFont.height ?? 16)

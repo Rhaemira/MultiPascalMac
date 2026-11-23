@@ -53,7 +53,7 @@ Available options:
 ```text
 --input <file|->       Read READ/READLN input from a file or standard input
 --time-limit <n>       Stop when the simulated time reaches n
---policy <policy>      round-robin, random, or shortest-job-first
+--policy <policy>      round-robin or random
 --seed <n>             Set the scheduler/variation seed
 --free                 Disable simulated timing costs
 -h, --help             Display command-line help
@@ -101,6 +101,7 @@ Multi-Pascal Mac implements a documented subset of the MPWin / Multi-Pascal dial
 The recovered language notes and known limitations are documented in:
 
 - [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — supported areas, limits, and validation scope.
+- [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) — implicit editor, compiler, debugger, scheduler, and runtime states.
 - [`docs/MPWinSpec.md`](docs/MPWinSpec.md) — recovered language and runtime notes, with source references.
 - [`docs/COMPILER_CHOICES.md`](docs/COMPILER_CHOICES.md) — research into possible external compiler components.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — project structure and development commands.

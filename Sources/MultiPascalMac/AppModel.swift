@@ -9,11 +9,18 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class MPWinAppModel: ObservableObject {
+    enum ActiveSheet: String, Identifiable {
+        case parameters
+        case input
+        case about
+
+        var id: String { rawValue }
+    }
+
     enum ResultsTab: String, CaseIterable, Identifiable {
         case output = "Output"
         case processes = "Processes"
-        case metrics = "Metrics"
-        case activity = "Activity"
+        case analysis = "Analysis"
         case diagnostics = "Diagnostics"
 
         var id: String { rawValue }
@@ -21,11 +28,16 @@ final class MPWinAppModel: ObservableObject {
             switch self {
             case .output: return "terminal"
             case .processes: return "person.3.sequence"
-            case .metrics: return "speedometer"
-            case .activity: return "chart.bar.xaxis"
+            case .analysis: return "chart.xyaxis.line"
             case .diagnostics: return "exclamationmark.triangle"
             }
         }
+    }
+
+    enum AnalysisTab: String, CaseIterable, Identifiable {
+        case metrics = "Metrics"
+        case activity = "Activity"
+        var id: String { rawValue }
     }
 
     struct SampleProgram: Identifiable, Hashable {
@@ -211,6 +223,7 @@ final class MPWinAppModel: ObservableObject {
     @Published private(set) var fileURL: URL?
     @Published private(set) var documentName = "Untitled"
     @Published private(set) var compiledProgram: CompiledProgram?
+    private var compiledSource: String?
     @Published private(set) var machine: Machine?
     @Published private(set) var output = ""
     @Published private(set) var diagnostics = ""
@@ -227,13 +240,21 @@ final class MPWinAppModel: ObservableObject {
     @Published var selectedTab: ResultsTab = .output
     @Published var breakpointText = ""
     @Published var breakpoints: Set<Int> = []
-    @Published var showingParameters = false
-    @Published var showingAbout = false
-    @Published var showingInput = false
+    @Published var activeSheet: ActiveSheet?
+    @Published var showingUnsavedChangesAlert = false
+    @Published var selectedAnalysisTab: AnalysisTab = .metrics
     @Published var inputText = ""
     @Published private(set) var inputSourceName: String?
     @Published var options = ProgramOptions()
 
+    private enum PendingDocumentAction {
+        case new
+        case sample(SampleProgram)
+        case openPanel
+        case openURL(URL)
+    }
+
+    private var pendingDocumentAction: PendingDocumentAction?
     private var suppressDirtyTracking = false
     private var operationID = UUID()
     private var cancellationToken: SimulationCancellation?
@@ -260,7 +281,6 @@ final class MPWinAppModel: ObservableObject {
         return Set(processes.map(\.processor)).count
     }
 
-    var hasCompiledProgram: Bool { compiledProgram != nil && !isDirty }
 
     // MARK: Compilation / execution
 
@@ -272,14 +292,15 @@ final class MPWinAppModel: ObservableObject {
             let unit = try parser.parseProgram()
             let program = try Loader.load(unit)
             compiledProgram = program
+            compiledSource = source
             breakpoints = Set(breakpoints.filter { program.executableLines.contains($0) })
             diagnostics = ""
             statusMessage = "Compiled · \(program.executableLines.count) executable lines"
-            isDirty = false
             selectedTab = .output
             return true
         } catch {
             compiledProgram = nil
+            compiledSource = nil
             diagnostics = format(error: error)
             statusMessage = "Compilation failed"
             selectedTab = .diagnostics
@@ -289,14 +310,14 @@ final class MPWinAppModel: ObservableObject {
 
     func run() {
         guard !isRunning else { return }
-        if compiledProgram == nil || isDirty {
+        if compiledProgram == nil || compiledSource != source {
             guard compile() else { return }
         }
         guard let program = compiledProgram else { return }
         if program.requiresInput && options.input == nil {
             inputText = ""
             inputSourceName = nil
-            showingInput = true
+            activeSheet = .input
             statusMessage = "Waiting for input"
             selectedTab = .output
             return
@@ -305,15 +326,19 @@ final class MPWinAppModel: ObservableObject {
     }
 
     func runWithInput() {
-        guard !isRunning, compiledProgram != nil else { return }
+        guard !isRunning else { return }
+        if compiledProgram == nil || compiledSource != source {
+            guard compile() else { return }
+        }
+        guard let program = compiledProgram else { return }
         options.input = inputText
         inputSourceName = "Console input"
-        showingInput = false
-        startBackgroundRun(program: compiledProgram!, machine: nil)
+        activeSheet = nil
+        startBackgroundRun(program: program, machine: nil)
     }
 
     func continueRun() {
-        guard !isRunning else { return }
+        guard !isRunning, lastOutcome?.isFailure != true, lastOutcome != .completed else { return }
         if case .cancelled? = lastOutcome {
             run()
             return
@@ -327,13 +352,21 @@ final class MPWinAppModel: ObservableObject {
 
     func step() {
         guard !isRunning else { return }
-        if compiledProgram == nil || isDirty {
+        if compiledProgram == nil || compiledSource != source {
             guard compile() else { return }
         }
         guard let program = compiledProgram else { return }
+        if program.requiresInput && options.input == nil {
+            inputText = ""
+            inputSourceName = nil
+            activeSheet = .input
+            statusMessage = "Waiting for input"
+            selectedTab = .output
+            return
+        }
         // A stopped machine's token stays cancelled, so stepping it again would only
         // report "Stopped". Start over instead, as Continue does.
-        if case .cancelled? = lastOutcome { machine = nil }
+        if case .cancelled? = lastOutcome { reset() }
         let current: Machine
         if let machine {
             current = machine
@@ -408,6 +441,72 @@ final class MPWinAppModel: ObservableObject {
     // MARK: Documents / samples
 
     func newFile() {
+        requestDocumentReplacement(.new)
+    }
+
+    func openSample(_ sample: SampleProgram) {
+        requestDocumentReplacement(.sample(sample))
+    }
+
+    func openSource() {
+        requestDocumentReplacement(.openPanel)
+    }
+
+    func loadSource(url: URL) {
+        requestDocumentReplacement(.openURL(url))
+    }
+
+    func saveSource() {
+        _ = saveCurrentDocument()
+    }
+
+    func saveSourceAs() {
+        _ = saveCurrentDocumentAs()
+    }
+
+    func savePendingDocumentAction() {
+        guard let action = pendingDocumentAction else { return }
+        guard saveCurrentDocument() else {
+            pendingDocumentAction = nil
+            return
+        }
+        pendingDocumentAction = nil
+        performDocumentReplacement(action)
+    }
+
+    func discardPendingDocumentChanges() {
+        guard let action = pendingDocumentAction else { return }
+        pendingDocumentAction = nil
+        performDocumentReplacement(action)
+    }
+
+    func cancelPendingDocumentAction() {
+        pendingDocumentAction = nil
+    }
+
+    private func requestDocumentReplacement(_ action: PendingDocumentAction) {
+        guard isDirty else {
+            performDocumentReplacement(action)
+            return
+        }
+        pendingDocumentAction = action
+        showingUnsavedChangesAlert = true
+    }
+
+    private func performDocumentReplacement(_ action: PendingDocumentAction) {
+        switch action {
+        case .new:
+            createNewFile()
+        case .sample(let sample):
+            replaceWithSample(sample)
+        case .openPanel:
+            presentOpenPanel()
+        case .openURL(let url):
+            readSource(url: url)
+        }
+    }
+
+    private func createNewFile() {
         operationID = UUID()
         suppressDirtyTracking = true
         source = Self.starterSource
@@ -417,11 +516,12 @@ final class MPWinAppModel: ObservableObject {
         documentName = "Untitled"
         clearInput()
         compiledProgram = nil
+        compiledSource = nil
         reset()
         statusMessage = "New document"
     }
 
-    func openSample(_ sample: SampleProgram) {
+    private func replaceWithSample(_ sample: SampleProgram) {
         operationID = UUID()
         suppressDirtyTracking = true
         source = sample.source
@@ -430,6 +530,7 @@ final class MPWinAppModel: ObservableObject {
         fileURL = nil
         documentName = sample.name
         compiledProgram = nil
+        compiledSource = nil
         inputSourceName = nil
         inputText = sample.input ?? ""
         options.input = sample.input
@@ -437,16 +538,16 @@ final class MPWinAppModel: ObservableObject {
         statusMessage = "Loaded sample · \(sample.name)"
     }
 
-    func openSource() {
+    private func presentOpenPanel() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = sourceFileTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        loadSource(url: url)
+        readSource(url: url)
     }
 
-    func loadSource(url: URL) {
+    private func readSource(url: URL) {
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             suppressDirtyTracking = true
@@ -455,6 +556,7 @@ final class MPWinAppModel: ObservableObject {
             isDirty = false
             fileURL = url
             documentName = url.lastPathComponent
+            compiledSource = nil
             reset()
             statusMessage = "Opened · \(url.lastPathComponent)"
         } catch {
@@ -464,27 +566,28 @@ final class MPWinAppModel: ObservableObject {
         }
     }
 
-    func saveSource() {
+    @discardableResult
+    private func saveCurrentDocument() -> Bool {
         if let url = fileURL {
-            writeSource(to: url)
-            return
+            return writeSource(to: url)
         }
-        saveSourceAs()
+        return saveCurrentDocumentAs()
     }
 
-    func saveSourceAs() {
+    @discardableResult
+    private func saveCurrentDocumentAs() -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [mpfType, .plainText]
         panel.nameFieldStringValue = (documentName == "Untitled" ? "Untitled" : URL(fileURLWithPath: documentName).deletingPathExtension().lastPathComponent) + ".mpf"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        writeSource(to: url)
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        return writeSource(to: url)
     }
 
     // MARK: Input
 
     func openInputSheet() {
         if inputText.isEmpty, let value = options.input { inputText = value }
-        showingInput = true
+        activeSheet = .input
     }
 
     func loadInputFile() {
@@ -520,12 +623,13 @@ final class MPWinAppModel: ObservableObject {
         cancellationToken?.cancel()
         cancellationToken = nil
         options.timing = timing
-        machine = nil
+        reset()
         statusMessage = "Parameters applied"
     }
 
     func applySimulationSettings(timeLimitText: String, policy: SchedulingPolicy, seedText: String,
                                  timing: TimingModel) {
+        guard !isRunning else { return }
         let trimmed = timeLimitText.trimmingCharacters(in: .whitespacesAndNewlines)
         options.timeLimit = Int(trimmed).flatMap { $0 > 0 ? $0 : nil }
         options.policy = policy
@@ -536,8 +640,9 @@ final class MPWinAppModel: ObservableObject {
     }
 
     func resetParametersToDefaults() {
+        guard !isRunning else { return }
         options = ProgramOptions()
-        machine = nil
+        reset()
         statusMessage = "Parameters reset to defaults"
     }
 
@@ -579,6 +684,16 @@ final class MPWinAppModel: ObservableObject {
             statusMessage = existingMachine == nil ? "Running…" : "Continuing…"
             selectedTab = .output
             diagnostics = ""
+            if existingMachine == nil {
+                output = ""
+                metrics = Metrics()
+                processes = []
+                processorLoad = []
+                profile = []
+                processorActivity = []
+                activityTraceTruncated = false
+                lastOutcome = nil
+            }
         case .step:
             statusMessage = "Stepping…"
         }
@@ -614,7 +729,7 @@ final class MPWinAppModel: ObservableObject {
             switch snapshot.outcome {
             case .deadlock:
                 selectedTab = .processes
-            case .runtimeError, .timeLimitExceeded:
+            case .runtimeError, .timeLimitExceeded, .stepLimitReached:
                 selectedTab = .diagnostics
             default:
                 break
@@ -653,16 +768,19 @@ final class MPWinAppModel: ObservableObject {
         if clearMachine { machine = nil }
     }
 
-    private func writeSource(to url: URL) {
+    @discardableResult
+    private func writeSource(to url: URL) -> Bool {
         do {
             try source.write(to: url, atomically: true, encoding: .utf8)
             fileURL = url
             documentName = url.lastPathComponent
             isDirty = false
             statusMessage = "Saved · \(url.lastPathComponent)"
+            return true
         } catch {
             diagnostics = error.localizedDescription
             selectedTab = .diagnostics
+            return false
         }
     }
 
@@ -688,9 +806,10 @@ final class MPWinAppModel: ObservableObject {
         switch outcome {
         case .completed: return "Completed"
         case .breakpoint(let line): return "Breakpoint · line \(line)"
+        case .stepCompleted: return "Step complete"
+        case .stepLimitReached: return "Stopped · safety step limit reached"
         case .timeLimitExceeded: return "Stopped · time alarm exceeded"
         case .deadlock: return "Stopped · deadlock detected"
-        case .stepLimitReached: return "Step complete"
         case .cancelled: return "Stopped"
         case .runtimeError: return "Runtime error"
         }
@@ -705,6 +824,8 @@ private extension RunOutcome {
             return "All currently live processes are blocked. Open Processes to inspect their wait states."
         case .timeLimitExceeded:
             return "The configured time alarm was reached before the program completed."
+        case .stepLimitReached:
+            return "The simulator reached its safety limit on scheduler iterations before the program completed."
         default:
             return ""
         }

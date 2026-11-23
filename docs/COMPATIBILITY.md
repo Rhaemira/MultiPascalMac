@@ -14,9 +14,10 @@ The application parses the MPWin/Multi-Pascal teaching-language source into an A
 | Primitive types | Integer, real, boolean, char; plus pointer, channel, spinlock, arrays and records |
 | Expressions | Arithmetic, comparisons, boolean/bitwise operators, precedence, built-ins and mixed integer/real arithmetic |
 | Statements | Assignment, blocks, `IF`, `CASE`, `WHILE`, `REPEAT`, `FOR`, `FORALL`, `FORK`, `JOIN`, read/write and memory operations |
-| Parallel-language model | `FORALL` creation and synchronization, grouping, processor placement, ports, channels, spinlocks and processor/topology accounting |
+| Parallel-language model | `FORALL` creation and synchronization, grouping, processor placement, `PORT` single-receiver channel assignment, channels, spinlocks and processor/topology accounting |
 | Syntax validation | Statement sequences require semicolon separators; declaration entries require their semicolons; `END.` requires the final period. Valid trailing semicolons and intentional empty statements are preserved. |
 | Debugging/inspection | Step/continue/stop, breakpoints, source-line diagnostics, process state, bounded processor-local operation/context-switch trace, and estimated timing metrics |
+| Scheduling | Round-Robin and seeded Random; unsupported scheduler policies are not exposed |
 | Safety | Invalid topology sizes, arithmetic overflow, non-finite real literals, oversized type/global declarations, pathological `FORALL` fan-out and excess process creation become diagnostics rather than unchecked host arithmetic or unbounded allocation |
 
 This table describes the intended implemented scope and the parts represented in tests; it is not a claim of formal conformance or exhaustive validation of all source combinations.
@@ -25,8 +26,11 @@ This table describes the intended implemented scope and the parts represented in
 
 - The recovered MPWin language specification explicitly lists enumerated types, subrange types, sets, packed arrays, variant records, files, and string variables as unsupported. String literals and output are supported by this implementation.
 - Exact timing costs were recovered from documentation where available, but not every timing detail has been recalibrated against the original MPWin Windows program. Virtual speedup is pedagogical model output.
+- `PORT` assigns the listed channel(s), including arrays of channels, to the spawned process as their sole receiver; any process may send, and receiver ownership is released when that process terminates. The simulator does not model packet capacity, congestion, physical link routing/distance, or network contention. On multicomputer topologies it applies a fixed link-delay cost per channel operation.
 - The Activity tab's operation timeline is built from actual simulator events and uses each processor's accumulated simulated cost units. It includes scheduler context-switch overhead and source-line/instruction events, but it is not a shared wall-clock trace or a measurement of host CPU utilization. The trace is capped at 50,000 events to bound memory usage.
 - Processor concurrency is modeled by a deterministic single-threaded event loop and per-processor workload accounting. The application does not execute the simulated processes simultaneously on OS threads.
+- Scheduler selection is limited to Round-Robin and seeded Random. A previous Shortest-Job-First option was removed because it used the same FIFO queue operation as Round-Robin and did not implement SJF.
+- The recovered MPWin rule that channel parameters must be declared `VAR` is now enforced during routine compilation. Local arrays of channels allocate independent channel buffers per element.
 - Simulated storage declarations are capped at **1,000,000 words per program**, and the runtime caps active/created simulated processes at **10,000**. `FORALL` range and grouping arithmetic is checked before spawning children. These are implementation safety limits to prevent host-memory exhaustion and integer overflow, not assertions about historical MPWin limits.
 - Parser coverage and tests are substantial but finite. Unusual syntax combinations, edge cases in historic dialect behavior, and differences from undocumented original behavior may remain.
 - The core test suite can be run on Linux with SwiftPM; the native SwiftUI/AppKit interface must be built and exercised on macOS. A successful Linux core test run does not establish that the AppKit branch has passed a full macOS type-check, GUI test or manual scrolling test.

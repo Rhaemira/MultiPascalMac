@@ -69,9 +69,8 @@ public struct RoutineDecl: Sendable {
     /// Explicit result type of a function, taken from the trailing `: T`.
     public var resultType: TypeNode?
     public var location: SourceLocation
-    public var isNested: Bool
     public init(name: String, isFunction: Bool, params: [ParamDecl], locals: [VarDecl],
-                body: [Statement]?, resultType: TypeNode?, location: SourceLocation, isNested: Bool) {
+                body: [Statement]?, resultType: TypeNode?, location: SourceLocation) {
         self.name = name
         self.isFunction = isFunction
         self.params = params
@@ -79,7 +78,6 @@ public struct RoutineDecl: Sendable {
         self.body = body
         self.resultType = resultType
         self.location = location
-        self.isNested = isNested
     }
 }
 
@@ -246,8 +244,6 @@ public struct CompiledUnit: Sendable {
     public var globals: [VarDecl]
     public var routines: [RoutineDecl]
     public var body: [Statement]
-    public var mainRoutineIndex: Int?
-    public var sourceLines: Int
 }
 
 public struct ArchitectureSpec: Sendable, Hashable {

@@ -36,7 +36,7 @@ struct MultiPascalMacApp: App {
     var body: some Scene {
         WindowGroup("Multi-Pascal Mac") {
             ContentView(model: model)
-                .frame(minWidth: 1080, minHeight: 720)
+                .frame(minWidth: 980, minHeight: 640)
                 .onOpenURL { url in
                     guard url.pathExtension.lowercased() == "mpf" else { return }
                     model.loadSource(url: url)
