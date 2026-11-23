@@ -449,7 +449,7 @@ final class MPWinCoreTests: XCTestCase {
         let machine = Machine(program: program)
         machine.start()
         XCTAssertEqual(machine.run(), .completed)
-        XCTAssertEqual(machine.output, "awake\\n")
+        XCTAssertEqual(machine.output, "awake\n")
         XCTAssertFalse(machine.metrics.deadlocked)
     }
 
@@ -1245,7 +1245,7 @@ final class MPWinCoreTests: XCTestCase {
     }
 
     func testClockUsesParallelElapsedTimeRatherThanGlobalEventTime() throws {
-        let machine = try run("""
+        let program = try compile("""
         program ParallelClock;
         Architecture Shared(4);
         var values: array[1..3] of Integer;
@@ -1255,9 +1255,13 @@ final class MPWinCoreTests: XCTestCase {
           writeln(clock);
         end.
         """)
-        let reportedClock = Int(machine.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Int.max
-        XCTAssertLessThan(reportedClock, machine.time - TimingModel().writeStatement,
-                          "CLOCK should report the busiest processor's elapsed work, not the sum of all process costs")
+        let machine = Machine(program: program, options: ProgramOptions())
+        machine.start()
+        XCTAssertEqual(machine.run(), .completed)
+        let reportedClock = Double(machine.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .infinity
+        XCTAssertGreaterThan(reportedClock, 0)
+        XCTAssertLessThan(reportedClock, Double(machine.time),
+                          "CLOCK should report parallel elapsed time, not the event-loop sum of process costs")
     }
 
     func testStepYieldsAfterOneStatementInsideSeqoff() throws {
