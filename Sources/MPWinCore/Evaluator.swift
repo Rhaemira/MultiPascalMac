@@ -474,6 +474,11 @@ func storeGlobal(_ ref: MemoryRef, type: TypeInfo, value: Value) {
     /// a packet taken by a statement that later blocks is recorded, so the retried statement
     /// gets the same packet instead of consuming another one.
     func readChannel(_ buffer: ChannelBuffer, ref: MemoryRef, process: Process) throws -> Value {
+        if let receiver = buffer.receiverProcessID, receiver != process.id {
+            throw MPWinError.runtime(Diagnostic(.error,
+                "Channel is assigned for reception to process \(receiver).",
+                SourceLocation(line: 0, column: 0)))
+        }
         let frame = process.frames.count - 1
         let cursor = process.frames[frame].callCursor
         if cursor < process.frames[frame].callResults.count,
